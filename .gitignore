@@ -1,0 +1,10 @@
+# build output
+/gary
+
+# local planning notes
+/Plan/
+
+# sqlite data (incl. WAL/SHM sidecars)
+*.db
+*.db-wal
+*.db-shm
