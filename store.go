@@ -219,7 +219,7 @@ func (s *Store) Recv(name string) (*Message, error) {
 // checkGuard is the "no thank-you" send guard: rejects empty and pleasantry-only
 // bodies. Heuristic with a known ceiling — stops the obvious flood, not every
 // paraphrase. The real guard is the contract agents follow (see CLAUDE.md).
-// ponytail: small deny-pattern by design; do NOT grow this into a classifier.
+// small deny-pattern by design; do NOT grow this into a classifier.
 var pleasantry = regexp.MustCompile(`(?i)^\W*(thanks?( you)?|thx|ty|got it|sounds good|will do|no problem|np|ok(ay)?|cool|great|awesome|nice|perfect|understood|acknowledged|ack|received|roger|cheers|👍|🙏|👌)[\s!.]*$`)
 
 func checkGuard(body string) error {
