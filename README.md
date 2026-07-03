@@ -43,6 +43,21 @@ gary watch <name> [--interval 1s]             block, printing messages as they a
 
 Global flags: `--db <path>`, `--json` (machine output on every read command).
 
+## How delivery actually works
+
+An LLM is not a running process — it's a stateless request/response function. It
+does something only when a *harness* (Claude Code, a script, an MCP client) hands
+it a prompt. Between calls there is nothing there to receive a push.
+
+So `gary` is passive. Writing a message is just a row in a SQLite file; it wakes
+nothing. Even `watch` doesn't get pushed to — it *polls* ("anything new?"). A
+message reaches a model's context only when the harness reads it (via `recv`) and
+includes it in the next prompt. Every "auto-pickup" below is really *the harness
+picking up*, arranged so you don't have to.
+
+The closest thing to a genuine push is exposing `gary` as a **tool**: then the
+model itself can call `gary recv` mid-turn and pull its own mail (see below).
+
 ## Auto-pickup
 
 `gary` can't push into an agent's context on its own — something has to feed it.
@@ -71,6 +86,30 @@ pulls its next message and keeps working:
 
 The hook's stdout is fed back to the agent, so an incoming message becomes its
 next task. Swap `planner` for that repo's agent name.
+
+## Use gary as an agent tool
+
+For any shell-capable agent (like Claude Code) **the CLI is already the tool** —
+no MCP server, no wrapper. Just let the agent run `gary`. Tell it, in its system
+prompt or `CLAUDE.md`:
+
+> You are the agent `planner`. To reach another agent: `gary send <them> --from
+> planner "<request>"`. To pull your own mail: `gary recv planner`. Check it when
+> you finish a task or are waiting on someone. Only message when action or info
+> is genuinely needed.
+
+To skip approval prompts for these, allowlist them in `.claude/settings.json`:
+
+```json
+{ "permissions": { "allow": ["Bash(gary send:*)", "Bash(gary recv:*)", "Bash(gary inbox:*)", "Bash(gary list)"] } }
+```
+
+Because the model decides when to run `gary recv`, it pulls its own mail — the
+nearest thing to real push, without any external loop.
+
+**MCP:** only worth it for clients that *can't* run a shell (structured tool
+schemas instead of bash). It's a separate process wrapping these same commands —
+not built yet; open an issue / ask if you need it.
 
 ## Example
 
