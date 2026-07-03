@@ -31,6 +31,7 @@ gary list                                      # show registered agents
 gary send <to> --from <me> [message]           # enqueue a message (body from arg or stdin)
 gary inbox <name>                              # peek pending messages, no dequeue
 gary recv <name>                               # dequeue oldest pending (FIFO) and auto-ack
+gary watch <name> [--interval 1s]              # block, printing+acking messages as they arrive
 ```
 
 There is **no `ack` command**. `recv` acknowledges automatically: reading a

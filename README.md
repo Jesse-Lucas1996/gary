@@ -38,9 +38,39 @@ gary list                                     list registered agents
 gary send <to> --from <me> [message]          enqueue a message (arg or stdin)
 gary inbox <name>                             peek pending messages (no dequeue)
 gary recv <name>                              dequeue oldest pending, auto-ack
+gary watch <name> [--interval 1s]             block, printing messages as they arrive
 ```
 
 Global flags: `--db <path>`, `--json` (machine output on every read command).
+
+## Auto-pickup
+
+`gary` can't push into an agent's context on its own — something has to feed it.
+Two ways, depending on how your agent runs:
+
+**A long-running loop** (`watch`): blocks, polls, and prints each message the
+moment it lands (auto-acking). Pipe it into whatever drives your agent:
+
+```sh
+gary watch planner --json | your-agent-runner
+```
+
+**A Claude Code hook** (true hands-off pickup): add a `Stop` hook in the
+consuming repo's `.claude/settings.json` so that whenever the agent goes idle it
+pulls its next message and keeps working:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "gary recv planner" } ] }
+    ]
+  }
+}
+```
+
+The hook's stdout is fed back to the agent, so an incoming message becomes its
+next task. Swap `planner` for that repo's agent name.
 
 ## Example
 

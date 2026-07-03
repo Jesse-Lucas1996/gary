@@ -20,6 +20,7 @@ Usage:
   gary send <to> --from <me> [message]          enqueue a message (body from arg or stdin)
   gary inbox <name>                             peek pending messages (no dequeue)
   gary recv <name>                              dequeue oldest pending, auto-ack
+  gary watch <name> [--interval 1s]             block, printing messages as they arrive
 
 Global flags: --db <path>, --json`
 
@@ -158,6 +159,36 @@ func run(args []string) error {
 			return nil
 		})
 
+	case "watch":
+		interval := fs.Duration("interval", time.Second, "poll interval between checks")
+		name, err := parse1(fs, rest, "watch <name> [--interval 1s]")
+		if err != nil {
+			return err
+		}
+		// poll loop — SQLite has no notify. --interval is the tuning knob.
+		// Ctrl-C to stop. Drains the queue each tick, then sleeps.
+		return withStore(dbFlag, func(s *Store) error {
+			for {
+				for {
+					m, err := s.Recv(name)
+					if err != nil {
+						return err
+					}
+					if m == nil {
+						break
+					}
+					if jsonOut {
+						if err := writeJSON(m); err != nil {
+							return err
+						}
+					} else {
+						fmt.Printf("from %s (#%d):\n%s\n\n", m.From, m.ID, m.Body)
+					}
+				}
+				time.Sleep(*interval)
+			}
+		})
+
 	case "-h", "--help", "help":
 		fmt.Println(usage)
 		return nil
@@ -169,7 +200,7 @@ func run(args []string) error {
 // reorder moves flags ahead of positionals so `gary register <name> --flag` works
 // (stdlib flag stops at the first positional). --json is the only boolean flag;
 // every other --flag consumes the next token as its value.
-// ponytail: a message word starting with "-" must sit after a "--" terminator.
+// a message word starting with "-" must sit after a "--" terminator.
 func reorder(args []string) []string {
 	boolFlags := map[string]bool{"json": true}
 	var flags, pos []string
