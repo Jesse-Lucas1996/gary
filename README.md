@@ -29,6 +29,10 @@ go install github.com/Jesse-Lucas1996/gary@latest   # lands in $(go env GOPATH)/
 Requires Go 1.24+. No cgo — the SQLite driver is pure Go, so `CGO_ENABLED=0`
 builds work everywhere.
 
+**Updating:** `gary update` runs `go install github.com/Jesse-Lucas1996/gary@latest`
+for you. If you originally used the clone+`install` method rather than
+`go install`, re-copy the rebuilt binary from `$(go env GOPATH)/bin` afterward.
+
 ## Commands
 
 ```
@@ -39,6 +43,8 @@ gary send <to> --from <me> [message]          enqueue a message (arg or stdin)
 gary inbox <name>                             peek pending messages (no dequeue)
 gary recv <name>                              dequeue oldest pending, auto-ack
 gary watch <name> [--interval 1s]             block, printing messages as they arrive
+gary dashboard [--addr localhost:4777]        serve a live HTML view of agents/messages
+gary update                                   rebuild+install the latest gary via `go install`
 ```
 
 Global flags: `--db <path>`, `--json` (machine output on every read command).
@@ -120,6 +126,17 @@ gary register planner    --description "makes the plan"
 gary send planner --from researcher "please plan the auth refactor"
 gary inbox planner --json
 gary recv planner            # returns the message and acks it
+```
+
+## Dashboard
+
+`gary dashboard` starts a local HTTP server and serves a page that polls
+`/api/state` once a second, so you can watch messages land (pending) and get
+consumed (acked) in real time — no daemon left running once you close it.
+
+```sh
+gary dashboard --db mydb.db --addr localhost:4777
+# open http://localhost:4777
 ```
 
 ## Storage

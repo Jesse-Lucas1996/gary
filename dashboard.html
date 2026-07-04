@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>gary dashboard</title>
+<style>
+  body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 2rem; background: #0b0b0c; color: #ddd; }
+  h1 { font-size: 1.1rem; color: #888; font-weight: 500; }
+  h1 code { color: #ddd; }
+  .agents { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+  .agent { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; }
+  .agent .badge { background: #b58900; color: #000; border-radius: 999px; padding: 0 .5rem; margin-left: .4rem; font-size: .8rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: #888; font-weight: 500; padding: .3rem .6rem; border-bottom: 1px solid #333; }
+  td { padding: .4rem .6rem; border-bottom: 1px solid #1e1e1e; vertical-align: top; }
+  tr.new { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { background: #24361f; } to { background: transparent; } }
+  .status { padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; }
+  .status.pending { background: #4a3a12; color: #e8b84b; }
+  .status.acked { background: #163a1f; color: #6cc06c; }
+  .body { max-width: 42rem; white-space: pre-wrap; word-break: break-word; }
+  .empty { color: #666; padding: 1rem; }
+</style>
+</head>
+<body>
+<h1>gary — watching <code id="db-path">…</code></h1>
+<div class="agents" id="agents"></div>
+<table>
+  <thead><tr><th>id</th><th>from</th><th>to</th><th>status</th><th>when</th><th>body</th></tr></thead>
+  <tbody id="messages"></tbody>
+</table>
+<div class="empty" id="empty" style="display:none">no messages yet</div>
+
+<script>
+// ponytail: 1s polling, no websocket/SSE — SQLite has no notify, this is the same
+// tradeoff `gary watch` makes. Fine at dashboard scale; revisit if polling load matters.
+const seen = new Set();
+
+function ago(unixSeconds) {
+  const s = Math.round(Date.now() / 1000 - unixSeconds);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+async function tick() {
+  let state;
+  try {
+    state = await (await fetch("/api/state")).json();
+  } catch {
+    return; // server down / hiccup — try again next tick
+  }
+
+  document.getElementById("db-path").textContent = state.db_path || "";
+
+  const agentsEl = document.getElementById("agents");
+  agentsEl.innerHTML = (state.agents || []).map(a => {
+    const pending = (state.messages || []).filter(m => m.to === a.name && m.status === "pending").length;
+    return `<div class="agent">${escapeHtml(a.name)}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
+  }).join("");
+
+  const msgs = state.messages || [];
+  document.getElementById("empty").style.display = msgs.length ? "none" : "block";
+  document.getElementById("messages").innerHTML = msgs.map(m => {
+    const isNew = !seen.has(m.id);
+    seen.add(m.id);
+    return `<tr class="${isNew ? "new" : ""}">
+      <td>#${m.id}</td>
+      <td>${escapeHtml(m.from)}</td>
+      <td>${escapeHtml(m.to)}</td>
+      <td><span class="status ${m.status}">${m.status}</span></td>
+      <td>${ago(m.created_at)}</td>
+      <td class="body">${escapeHtml(m.body)}</td>
+    </tr>`;
+  }).join("");
+}
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

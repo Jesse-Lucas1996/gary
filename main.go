@@ -1,15 +1,23 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 	"time"
 )
+
+//go:embed dashboard.html
+var dashboardHTML []byte
+
+const modulePath = "github.com/Jesse-Lucas1996/gary"
 
 const usage = `gary — local mailbox/queue for AI agents across repos
 
@@ -21,6 +29,8 @@ Usage:
   gary inbox <name>                             peek pending messages (no dequeue)
   gary recv <name>                              dequeue oldest pending, auto-ack
   gary watch <name> [--interval 1s]             block, printing messages as they arrive
+  gary dashboard [--addr localhost:4777]        serve a live HTML view of agents/messages
+  gary update                                   rebuild+install the latest gary via go install
 
 Global flags: --db <path>, --json`
 
@@ -189,6 +199,19 @@ func run(args []string) error {
 			}
 		})
 
+	case "dashboard":
+		addr := fs.String("addr", "localhost:4777", "address to listen on")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return withStore(dbFlag, func(s *Store) error { return serveDashboard(s, dbFlag, *addr) })
+
+	case "update":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return runUpdate()
+
 	case "-h", "--help", "help":
 		fmt.Println(usage)
 		return nil
@@ -246,6 +269,52 @@ func withStore(dbFlag string, fn func(*Store) error) error {
 	}
 	defer s.Close()
 	return fn(s)
+}
+
+// serveDashboard runs a tiny local HTTP server (stdlib only) so a browser can
+// watch messages land and get consumed in real time. The browser polls
+// /api/state every second — same tradeoff as `watch`, just rendered as HTML.
+func serveDashboard(s *Store, dbFlag, addr string) error {
+	dbPath, err := DBPath(dbFlag)
+	if err != nil {
+		return err
+	}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(dashboardHTML)
+	})
+	http.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		agents, err := s.List()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		msgs, err := s.Recent(200)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"agents": agents, "messages": msgs, "db_path": dbPath})
+	})
+	fmt.Printf("gary dashboard on http://%s (db: %s)\n", addr, dbPath)
+	return http.ListenAndServe(addr, nil)
+}
+
+// runUpdate shells out to `go install <module>@latest` — the Go toolchain
+// already resolves versions, verifies checksums, and rebuilds; no need to
+// reinvent binary download/replace. Only updates the go-install location
+// (GOPATH/bin); if you copied the binary elsewhere, re-copy it after.
+func runUpdate() error {
+	fmt.Printf("go install %s@latest\n", modulePath)
+	cmd := exec.Command("go", "install", modulePath+"@latest")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	fmt.Println("updated. if `gary` isn't on your PATH from $(go env GOPATH)/bin, re-copy it there.")
+	return nil
 }
 
 func writeJSON(v any) error {

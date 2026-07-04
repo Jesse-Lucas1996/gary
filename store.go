@@ -184,6 +184,27 @@ func (s *Store) Inbox(name string) ([]Message, error) {
 	return out, rows.Err()
 }
 
+// Recent returns the most recent messages across all agents, newest first,
+// for the dashboard's live view. Read-only — does not touch message status.
+func (s *Store) Recent(limit int) ([]Message, error) {
+	rows, err := s.db.Query(`
+		SELECT id, from_agent, to_agent, body, status, created_at, acked_at
+		FROM messages ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent: %w", err)
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.From, &m.To, &m.Body, &m.Status, &m.CreatedAt, &m.AckedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // Recv atomically dequeues the oldest pending message and marks it acked.
 // Returns (nil, nil) when the queue is empty.
 func (s *Store) Recv(name string) (*Message, error) {
