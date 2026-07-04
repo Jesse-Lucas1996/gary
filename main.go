@@ -310,6 +310,10 @@ func runUpdate() error {
 	cmd := exec.Command("go", "install", modulePath+"@latest")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// ponytail: no version tags on this repo, so @latest is a pseudo-version
+	// lookup — proxy.golang.org caches that and can lag behind a fresh push.
+	// GOPROXY=direct skips the proxy and resolves straight from git.
+	cmd.Env = append(os.Environ(), "GOPROXY=direct")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
