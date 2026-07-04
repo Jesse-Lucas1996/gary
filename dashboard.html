@@ -8,7 +8,8 @@
   h1 { font-size: 1.1rem; color: #888; font-weight: 500; }
   h1 code { color: #ddd; }
   .agents { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-  .agent { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; }
+  .agent { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; cursor: pointer; }
+  .agent.active { border-color: #6cc06c; color: #6cc06c; }
   .agent .badge { background: #b58900; color: #000; border-radius: 999px; padding: 0 .5rem; margin-left: .4rem; font-size: .8rem; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: #888; font-weight: 500; padding: .3rem .6rem; border-bottom: 1px solid #333; }
@@ -35,6 +36,7 @@
 // ponytail: 1s polling, no websocket/SSE — SQLite has no notify, this is the same
 // tradeoff `gary watch` makes. Fine at dashboard scale; revisit if polling load matters.
 const seen = new Set();
+let selected = null; // ponytail: in-memory filter, add URL param if deep-linking matters
 
 function ago(unixSeconds) {
   const s = Math.round(Date.now() / 1000 - unixSeconds);
@@ -61,10 +63,18 @@ async function tick() {
   const agentsEl = document.getElementById("agents");
   agentsEl.innerHTML = (state.agents || []).map(a => {
     const pending = (state.messages || []).filter(m => m.to === a.name && m.status === "pending").length;
-    return `<div class="agent">${escapeHtml(a.name)}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
+    const active = a.name === selected ? " active" : "";
+    return `<div class="agent${active}" data-name="${escapeHtml(a.name)}">${escapeHtml(a.name)}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
   }).join("");
+  agentsEl.querySelectorAll(".agent").forEach(el => {
+    el.onclick = () => {
+      const name = el.dataset.name;
+      selected = selected === name ? null : name;
+      tick();
+    };
+  });
 
-  const msgs = state.messages || [];
+  const msgs = (state.messages || []).filter(m => !selected || m.from === selected || m.to === selected);
   document.getElementById("empty").style.display = msgs.length ? "none" : "block";
   document.getElementById("messages").innerHTML = msgs.map(m => {
     const isNew = !seen.has(m.id);
