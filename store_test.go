@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -116,5 +117,121 @@ func mustReg(t *testing.T, s *Store, name string) {
 	t.Helper()
 	if err := s.Register(name, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUnregisterAfterSending(t *testing.T) {
+	s := testStore(t)
+	mustReg(t, s, "sender")
+	mustReg(t, s, "recipient")
+	if _, err := s.Send("sender", "recipient", "a real message"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Unregister("sender"); err != nil {
+		t.Fatalf("unregister after sending: %v", err)
+	}
+	msgs, err := s.Inbox("recipient")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].From != "sender" {
+		t.Fatalf("recipient lost mail from a departed sender: %+v", msgs)
+	}
+}
+
+func TestUnregisterStillDropsOwnQueue(t *testing.T) {
+	s := testStore(t)
+	mustReg(t, s, "a")
+	mustReg(t, s, "b")
+	if _, err := s.Send("a", "b", "for b only"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Unregister("b"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE to_agent='b'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("unregister should still cascade the agent's own inbox, %d rows left", n)
+	}
+}
+
+const legacySchema = `
+CREATE TABLE agents (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL
+);
+CREATE TABLE messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent TEXT NOT NULL REFERENCES agents(name),
+    to_agent   TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    acked_at   INTEGER
+);
+CREATE INDEX idx_inbox ON messages(to_agent, status, id);`
+
+func TestMigratesLegacyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(legacySchema); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"old-sender", "old-recipient"} {
+		if _, err := raw.Exec(`INSERT INTO agents(name, description, created_at, last_seen) VALUES(?,'',1,1)`, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, body := range []string{"first", "second", "third"} {
+		if _, err := raw.Exec(`INSERT INTO messages(id, from_agent, to_agent, body, status, created_at)
+			VALUES(?,?,?,?,'pending',?)`, i+1, "old-sender", "old-recipient", body, i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("opening a legacy db must migrate it: %v", err)
+	}
+	defer s.Close()
+
+	msgs, err := s.Inbox("old-recipient")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("migration lost messages: got %d, want 3", len(msgs))
+	}
+	for i, want := range []string{"first", "second", "third"} {
+		if msgs[i].Body != want || msgs[i].ID != int64(i+1) {
+			t.Fatalf("migration changed FIFO order or ids: %+v", msgs)
+		}
+	}
+	if err := s.Unregister("old-sender"); err != nil {
+		t.Fatalf("legacy db still blocks unregister: %v", err)
+	}
+	mustReg(t, s, "new-agent")
+	id, err := s.Send("new-agent", "old-recipient", "after the migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id <= 3 {
+		t.Fatalf("autoincrement reused an id after the table swap: got %d", id)
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("migration must be idempotent: %v", err)
+	}
+	if again, _ := s.Inbox("old-recipient"); len(again) != 4 {
+		t.Fatalf("re-running migrate changed the data: %d messages", len(again))
 	}
 }

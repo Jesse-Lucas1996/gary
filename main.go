@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 )
@@ -17,11 +22,16 @@ import (
 //go:embed dashboard.html
 var dashboardHTML []byte
 
+//go:embed login.html
+var loginHTML []byte
+
 const modulePath = "github.com/Jesse-Lucas1996/gary"
 
-const usage = `gary — local mailbox/queue for AI agents across repos
+const version = "0.2.0"
 
-Usage:
+const usage = `gary — mailbox/queue for AI agents, across repos and machines
+
+Messaging:
   gary register <name> [--description <text>]   add/update an agent
   gary unregister <name>                        remove an agent and its queue
   gary list                                     list registered agents
@@ -29,10 +39,28 @@ Usage:
   gary inbox <name>                             peek pending messages (no dequeue)
   gary recv <name>                              dequeue oldest pending, auto-ack
   gary watch <name> [--interval 1s]             block, printing messages as they arrive
-  gary dashboard [--addr localhost:4777]        serve a live HTML view of agents/messages
-  gary update                                   rebuild+install the latest gary via go install
 
-Global flags: --db <path>, --json`
+Cross-machine:
+  gary serve [--addr 127.0.0.1:4777]            run the hub: owns the DB, serves the API
+  gary token new                                generate a shared token (agents/nodes)
+  gary user add|rm|list <name>                  dashboard login accounts
+  gary node [--name <machine>]                  run agents on this machine
+  gary nodes                                    list machines that have checked in
+
+Claude agents:
+  gary spawn <agent> --node <m> --repo <path>   start a claude agent on a node
+  gary spawns                                   list spawns and their status
+  gary stop <agent>                             wind an agent down after its current turn
+
+Other:
+  gary dashboard [--addr localhost:4777]        live HTML view (no API)
+  gary update                                   rebuild+install the latest gary
+
+Global flags:
+  --db <path>     local database file
+  --url <hub>     talk to a hub instead of a local file (or $GARY_URL)
+  --token <tok>   hub token (or $GARY_TOKEN, or ~/.config/gary/token)
+  --json          machine-readable output`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -48,11 +76,13 @@ func run(args []string) error {
 	}
 	cmd, rest := args[0], reorder(args[1:])
 
-	// Shared flags parsed per-subcommand so --db/--json can sit anywhere.
-	var dbFlag string
+	// Shared flags parsed per-subcommand so they can sit anywhere in the line.
+	var c conn
 	var jsonOut bool
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	fs.StringVar(&dbFlag, "db", "", "database file path")
+	fs.StringVar(&c.db, "db", "", "database file path")
+	fs.StringVar(&c.url, "url", "", "hub url (default $GARY_URL; empty means local file)")
+	fs.StringVar(&c.token, "token", "", "hub token (default $GARY_TOKEN or ~/.config/gary/token)")
 	fs.BoolVar(&jsonOut, "json", false, "machine-readable JSON output")
 
 	switch cmd {
@@ -62,21 +92,21 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error { return s.Register(name, *desc) })
+		return c.with(func(b Backend) error { return b.RegisterOn(name, *desc, "") })
 
 	case "unregister":
 		name, err := parse1(fs, rest, "unregister <name>")
 		if err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error { return s.Unregister(name) })
+		return c.with(func(b Backend) error { return b.Unregister(name) })
 
 	case "list":
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error {
-			agents, err := s.List()
+		return c.with(func(b Backend) error {
+			agents, err := b.List()
 			if err != nil {
 				return err
 			}
@@ -84,9 +114,9 @@ func run(args []string) error {
 				return writeJSON(agents)
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tLAST SEEN\tDESCRIPTION")
+			fmt.Fprintln(tw, "NAME\tNODE\tLAST SEEN\tDESCRIPTION")
 			for _, a := range agents {
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", a.Name, ago(a.LastSeen), a.Description)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.Name, dash(a.Node), ago(a.LastSeen), a.Description)
 			}
 			return tw.Flush()
 		})
@@ -111,8 +141,8 @@ func run(args []string) error {
 			}
 			body = string(b)
 		}
-		return withStore(dbFlag, func(s *Store) error {
-			id, err := s.Send(*from, to, body)
+		return c.with(func(bk Backend) error {
+			id, err := bk.Send(*from, to, body)
 			if err != nil {
 				return err
 			}
@@ -128,8 +158,8 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error {
-			msgs, err := s.Inbox(name)
+		return c.with(func(b Backend) error {
+			msgs, err := b.Inbox(name)
 			if err != nil {
 				return err
 			}
@@ -153,8 +183,8 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error {
-			m, err := s.Recv(name)
+		return c.with(func(b Backend) error {
+			m, err := b.Recv(name)
 			if err != nil {
 				return err
 			}
@@ -170,41 +200,164 @@ func run(args []string) error {
 		})
 
 	case "watch":
-		interval := fs.Duration("interval", time.Second, "poll interval between checks")
+		interval := fs.Duration("interval", time.Second, "how long to wait for each message")
 		name, err := parse1(fs, rest, "watch <name> [--interval 1s]")
 		if err != nil {
 			return err
 		}
-		// poll loop — SQLite has no notify. --interval is the tuning knob.
-		// Ctrl-C to stop. Drains the queue each tick, then sleeps.
-		return withStore(dbFlag, func(s *Store) error {
+		return c.with(func(b Backend) error {
 			for {
-				for {
-					m, err := s.Recv(name)
-					if err != nil {
+				m, err := b.RecvWait(context.Background(), name, *interval)
+				if err != nil {
+					return err
+				}
+				if m == nil {
+					continue
+				}
+				if jsonOut {
+					if err := writeJSON(m); err != nil {
 						return err
 					}
-					if m == nil {
-						break
-					}
-					if jsonOut {
-						if err := writeJSON(m); err != nil {
-							return err
-						}
-					} else {
-						fmt.Printf("from %s (#%d):\n%s\n\n", m.From, m.ID, m.Body)
-					}
+				} else {
+					fmt.Printf("from %s (#%d):\n%s\n\n", m.From, m.ID, m.Body)
 				}
-				time.Sleep(*interval)
 			}
 		})
 
-	case "dashboard":
-		addr := fs.String("addr", "localhost:4777", "address to listen on")
+	case "serve":
+		addr := fs.String("addr", "127.0.0.1:4777", "address to listen on")
+		insecure := fs.Bool("insecure", false, "allow binding a public interface")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return withStore(dbFlag, func(s *Store) error { return serveDashboard(s, dbFlag, *addr) })
+		return serveCmd(c, *addr, *insecure, true)
+
+	case "dashboard":
+		addr := fs.String("addr", "localhost:4777", "address to listen on")
+		insecure := fs.Bool("insecure", false, "allow binding a public interface")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return serveCmd(c, *addr, *insecure, false)
+
+	case "node":
+		name := fs.String("name", "", "node name (default: hostname)")
+		bin := fs.String("claude-bin", "claude", "claude executable to run")
+		limit := fs.Duration("turn-timeout", 30*time.Minute, "max wall time for one claude turn (0 = none)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		ctx, stop := signalContext()
+		defer stop()
+		return c.with(func(b Backend) error { return runNode(ctx, b, *name, *bin, *limit) })
+
+	case "nodes":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return c.with(func(b Backend) error {
+			nodes, err := b.Nodes()
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(nodes)
+			}
+			if len(nodes) == 0 {
+				fmt.Println("(no nodes — run `gary node` on a machine to add one)")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NODE\tSTATUS\tLAST SEEN\tVERSION")
+			for _, n := range nodes {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n.Name, nodeStatus(n.LastSeen), ago(n.LastSeen), n.Version)
+			}
+			return tw.Flush()
+		})
+
+	case "spawn":
+		spec := SpawnSpec{}
+		fs.StringVar(&spec.Node, "node", "", "node to run on (required)")
+		fs.StringVar(&spec.Repo, "repo", "", "working directory on that node (required)")
+		fs.StringVar(&spec.Prompt, "prompt", "", "extra system prompt for the agent")
+		fs.StringVar(&spec.Model, "model", "", "model alias (opus, sonnet, ...)")
+		fs.StringVar(&spec.PermissionMode, "permission-mode", "acceptEdits", "claude permission mode")
+		fs.BoolVar(&spec.Force, "force", false, "skip node/name checks")
+		yolo := fs.Bool("yolo", false, "run with --dangerously-skip-permissions")
+		agent, err := parse1(fs, rest, "spawn <agent> --node <machine> --repo <path>")
+		if err != nil {
+			return err
+		}
+		spec.Agent = agent
+		if *yolo {
+			spec.PermissionMode = "bypassPermissions"
+		}
+		if spec.Node == "" || spec.Repo == "" {
+			return fmt.Errorf("usage: gary spawn <agent> --node <machine> --repo <path>")
+		}
+		return c.with(func(b Backend) error {
+			id, err := b.Spawn(spec)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(map[string]int64{"id": id})
+			}
+			fmt.Printf("queued spawn #%d: %s on %s (%s)\n", id, spec.Agent, spec.Node, spec.Repo)
+			return nil
+		})
+
+	case "spawns":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return c.with(func(b Backend) error {
+			spawns, err := b.Spawns(100)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(spawns)
+			}
+			if len(spawns) == 0 {
+				fmt.Println("(no spawns)")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "ID\tAGENT\tNODE\tSTATUS\tREPO\tNOTE")
+			for _, s := range spawns {
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Agent, s.Node, s.Status, s.Repo, oneline(s.Error))
+			}
+			return tw.Flush()
+		})
+
+	case "stop":
+		name, err := parse1(fs, rest, "stop <agent>")
+		if err != nil {
+			return err
+		}
+		return c.with(func(b Backend) error {
+			if err := b.StopSpawn(name); err != nil {
+				return err
+			}
+			fmt.Printf("%s will stop after its current turn\n", name)
+			return nil
+		})
+
+	case "token":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.Arg(0) != "new" {
+			return fmt.Errorf("usage: gary token new")
+		}
+		return newToken()
+
+	case "user":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return userCmd(fs.Args())
 
 	case "update":
 		if err := fs.Parse(rest); err != nil {
@@ -220,12 +373,123 @@ func run(args []string) error {
 	}
 }
 
+func serveCmd(c conn, addr string, insecure, api bool) error {
+	if url, _ := HubURL(c.url); url != "" {
+		return fmt.Errorf("serve owns the database directly; unset GARY_URL (that points at a hub, and this would be it)")
+	}
+	path, err := DBPath(c.db)
+	if err != nil {
+		return err
+	}
+	s, err := Open(path)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	token, err := ResolveToken(c.token)
+	if err != nil {
+		return err
+	}
+	users, err := openUsers()
+	if err != nil {
+		return err
+	}
+	return serveHub(s, serveOpts{addr: addr, token: token, insecure: insecure, api: api, dbPath: path, users: users})
+}
+
+func openUsers() (*userStore, error) {
+	p, err := UsersPath()
+	if err != nil {
+		return nil, err
+	}
+	return loadUsers(p)
+}
+
+func userCmd(args []string) error {
+	users, err := openUsers()
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: gary user add <name> | gary user rm <name> | gary user list")
+	}
+	switch args[0] {
+	case "add":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: gary user add <name>")
+		}
+		pw, err := readPassword("password: ")
+		if err != nil {
+			return err
+		}
+		if confirm, err := readPassword("confirm: "); err != nil {
+			return err
+		} else if confirm != pw {
+			return fmt.Errorf("passwords do not match")
+		}
+		if err := users.set(args[1], pw); err != nil {
+			return err
+		}
+		fmt.Printf("user %q set in %s\n", args[1], users.path)
+		fmt.Println("existing browser sessions were invalidated; sign in again")
+		return nil
+	case "rm":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: gary user rm <name>")
+		}
+		if err := users.remove(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("removed %q\n", args[1])
+		return nil
+	case "list":
+		names := users.names()
+		if len(names) == 0 {
+			fmt.Println("(no users — run `gary user add <name>`; the dashboard falls back to the token)")
+			return nil
+		}
+		for _, n := range names {
+			fmt.Println(n)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown: gary user %s", args[0])
+	}
+}
+
+func newToken() error {
+	path, err := TokenPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists; delete it first if you mean to rotate (every machine needs the new value)", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return err
+	}
+	tok := base64.RawURLEncoding.EncodeToString(b[:])
+	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n\ncopy this to every machine (same path, or $GARY_TOKEN):\n  %s\n", path, tok)
+	return nil
+}
+
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 // reorder moves flags ahead of positionals so `gary register <name> --flag` works
-// (stdlib flag stops at the first positional). --json is the only boolean flag;
-// every other --flag consumes the next token as its value.
+// (stdlib flag stops at the first positional). Boolean flags don't consume the
+// next token; every other --flag does.
 // a message word starting with "-" must sit after a "--" terminator.
 func reorder(args []string) []string {
-	boolFlags := map[string]bool{"json": true}
+	boolFlags := map[string]bool{"json": true, "insecure": true, "force": true, "yolo": true}
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -256,49 +520,6 @@ func parse1(fs *flag.FlagSet, args []string, use string) (string, error) {
 		return "", fmt.Errorf("usage: gary %s", use)
 	}
 	return fs.Arg(0), nil
-}
-
-func withStore(dbFlag string, fn func(*Store) error) error {
-	path, err := DBPath(dbFlag)
-	if err != nil {
-		return err
-	}
-	s, err := Open(path)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	return fn(s)
-}
-
-// serveDashboard runs a tiny local HTTP server (stdlib only) so a browser can
-// watch messages land and get consumed in real time. The browser polls
-// /api/state every second — same tradeoff as `watch`, just rendered as HTML.
-func serveDashboard(s *Store, dbFlag, addr string) error {
-	dbPath, err := DBPath(dbFlag)
-	if err != nil {
-		return err
-	}
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(dashboardHTML)
-	})
-	http.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
-		agents, err := s.List()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		msgs, err := s.Recent(200)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"agents": agents, "messages": msgs, "db_path": dbPath})
-	})
-	fmt.Printf("gary dashboard on http://%s (db: %s)\n", addr, dbPath)
-	return http.ListenAndServe(addr, nil)
 }
 
 // runUpdate shells out to `go install <module>@latest` — the Go toolchain
@@ -339,6 +560,20 @@ func ago(unix int64) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+func nodeStatus(lastSeen int64) string {
+	if time.Since(time.Unix(lastSeen, 0)) > 3*heartbeatEvery {
+		return "stale"
+	}
+	return "up"
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func oneline(s string) string {

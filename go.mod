@@ -1,6 +1,6 @@
 module github.com/Jesse-Lucas1996/gary
 
-go 1.26.3
+go 1.25.0
 
 require modernc.org/sqlite v1.53.0
 

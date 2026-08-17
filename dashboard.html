@@ -7,25 +7,57 @@
   body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 2rem; background: #0b0b0c; color: #ddd; }
   h1 { font-size: 1.1rem; color: #888; font-weight: 500; }
   h1 code { color: #ddd; }
-  .agents { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-  .agent { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; cursor: pointer; }
+  h1 .signout { float: right; color: #666; font-size: .8rem; text-decoration: none; }
+  h1 .signout:hover { color: #d76b6b; }
+  h2 { font-size: .8rem; color: #777; font-weight: 500; text-transform: uppercase;
+       letter-spacing: .08em; margin: 1.6rem 0 .5rem; }
+  .chips { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .chip { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; }
+  .agent { cursor: pointer; }
   .agent.active { border-color: #6cc06c; color: #6cc06c; }
-  .agent .badge { background: #b58900; color: #000; border-radius: 999px; padding: 0 .5rem; margin-left: .4rem; font-size: .8rem; }
+  .chip .badge { background: #b58900; color: #000; border-radius: 999px; padding: 0 .5rem;
+                 margin-left: .4rem; font-size: .8rem; }
+  .chip .sub { color: #666; font-size: .8rem; margin-left: .4rem; }
+  .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 999px; margin-right: .4rem; }
+  .dot.up { background: #6cc06c; }
+  .dot.stale { background: #b04a4a; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: #888; font-weight: 500; padding: .3rem .6rem; border-bottom: 1px solid #333; }
   td { padding: .4rem .6rem; border-bottom: 1px solid #1e1e1e; vertical-align: top; }
   tr.new { animation: flash 1.2s ease-out; }
   @keyframes flash { from { background: #24361f; } to { background: transparent; } }
-  .status { padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; }
-  .status.pending { background: #4a3a12; color: #e8b84b; }
-  .status.acked { background: #163a1f; color: #6cc06c; }
+  .status { padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; white-space: nowrap; }
+  .status.pending, .status.queued  { background: #4a3a12; color: #e8b84b; }
+  .status.acked, .status.running   { background: #163a1f; color: #6cc06c; }
+  .status.claimed, .status.stopping { background: #123240; color: #5aa8c6; }
+  .status.failed                   { background: #3d1919; color: #d76b6b; }
+  .status.stopped                  { background: #242424; color: #999; }
   .body { max-width: 42rem; white-space: pre-wrap; word-break: break-word; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; color: #999; }
   .empty { color: #666; padding: 1rem; }
+  button.stop { background: none; border: 1px solid #444; color: #999; border-radius: 4px;
+                padding: .1rem .5rem; font-size: .75rem; cursor: pointer; }
+  button.stop:hover { border-color: #b04a4a; color: #d76b6b; }
 </style>
 </head>
 <body>
-<h1>gary — watching <code id="db-path">…</code></h1>
-<div class="agents" id="agents"></div>
+<h1>gary — watching <code id="db-path">…</code><a class="signout" id="signout" href="logout">sign out</a></h1>
+
+<h2>machines</h2>
+<div class="chips" id="nodes"></div>
+<div class="empty" id="nodes-empty" style="display:none">no nodes — run <code>gary node</code> on a machine</div>
+
+<h2>live agents</h2>
+<table>
+  <thead><tr><th>agent</th><th>node</th><th>status</th><th>repo</th><th>model</th><th>queue</th><th>started</th><th></th></tr></thead>
+  <tbody id="spawns"></tbody>
+</table>
+<div class="empty" id="spawns-empty" style="display:none">no spawned agents — <code>gary spawn &lt;name&gt; --node &lt;machine&gt; --repo &lt;path&gt;</code></div>
+
+<h2>agents</h2>
+<div class="chips" id="agents"></div>
+
+<h2>messages</h2>
 <table>
   <thead><tr><th>id</th><th>from</th><th>to</th><th>status</th><th>when</th><th>body</th></tr></thead>
   <tbody id="messages"></tbody>
@@ -47,33 +79,78 @@ function ago(unixSeconds) {
 }
 
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
-async function tick() {
-  let state;
-  try {
-    state = await (await fetch("/api/state")).json();
-  } catch {
-    return; // server down / hiccup — try again next tick
-  }
+const LIVE = new Set(["queued", "claimed", "running", "stopping"]);
 
-  document.getElementById("db-path").textContent = state.db_path || "";
+async function stopAgent(name) {
+  if (!confirm(`Stop agent "${name}" after its current turn?`)) return;
+  await fetch("v1/spawns/stop", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({Agent: name}),
+  });
+  tick();
+}
 
-  const agentsEl = document.getElementById("agents");
-  agentsEl.innerHTML = (state.agents || []).map(a => {
+function renderNodes(state) {
+  const staleAfter = state.stale_after || 90;
+  const now = Date.now() / 1000;
+  const nodes = state.nodes || [];
+  document.getElementById("nodes-empty").style.display = nodes.length ? "none" : "block";
+  document.getElementById("nodes").innerHTML = nodes.map(n => {
+    const live = (now - n.last_seen) < staleAfter;
+    const agents = (state.spawns || []).filter(s => s.node === n.name && LIVE.has(s.status)).length;
+    return `<div class="chip">
+      <span class="dot ${live ? "up" : "stale"}"></span>${escapeHtml(n.name)}
+      <span class="sub">${agents} agent${agents === 1 ? "" : "s"} · ${live ? ago(n.last_seen) : "stale, " + ago(n.last_seen)}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderSpawns(state) {
+  const live = (state.spawns || []).filter(s => LIVE.has(s.status));
+  document.getElementById("spawns-empty").style.display = live.length ? "none" : "block";
+  document.getElementById("spawns").innerHTML = live.map(s => {
+    const pending = (state.messages || []).filter(m => m.to === s.agent && m.status === "pending").length;
+    const stop = state.api
+      ? `<button class="stop" data-agent="${escapeHtml(s.agent)}">stop</button>`
+      : "";
+    return `<tr>
+      <td>${escapeHtml(s.agent)}</td>
+      <td>${escapeHtml(s.node)}</td>
+      <td><span class="status ${s.status}">${s.status}</span></td>
+      <td class="mono">${escapeHtml(s.repo)}</td>
+      <td class="mono">${escapeHtml(s.model || "default")}</td>
+      <td>${pending ? `<span class="badge">${pending}</span> waiting` : "idle"}</td>
+      <td>${ago(s.created_at)}</td>
+      <td>${stop}</td>
+    </tr>`;
+  }).join("");
+  document.querySelectorAll("button.stop").forEach(el => {
+    el.onclick = () => stopAgent(el.dataset.agent);
+  });
+}
+
+function renderAgents(state) {
+  const el = document.getElementById("agents");
+  el.innerHTML = (state.agents || []).map(a => {
     const pending = (state.messages || []).filter(m => m.to === a.name && m.status === "pending").length;
     const active = a.name === selected ? " active" : "";
-    return `<div class="agent${active}" data-name="${escapeHtml(a.name)}">${escapeHtml(a.name)}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
+    const where = a.node ? `<span class="sub">${escapeHtml(a.node)}</span>` : "";
+    return `<div class="chip agent${active}" data-name="${escapeHtml(a.name)}">${escapeHtml(a.name)}${where}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
   }).join("");
-  agentsEl.querySelectorAll(".agent").forEach(el => {
-    el.onclick = () => {
-      const name = el.dataset.name;
+  el.querySelectorAll(".agent").forEach(node => {
+    node.onclick = () => {
+      const name = node.dataset.name;
       selected = selected === name ? null : name;
       tick();
     };
   });
+}
 
+function renderMessages(state) {
   const msgs = (state.messages || []).filter(m => !selected || m.from === selected || m.to === selected);
   document.getElementById("empty").style.display = msgs.length ? "none" : "block";
   document.getElementById("messages").innerHTML = msgs.map(m => {
@@ -88,6 +165,23 @@ async function tick() {
       <td class="body">${escapeHtml(m.body)}</td>
     </tr>`;
   }).join("");
+}
+
+async function tick() {
+  let state;
+  try {
+    const resp = await fetch("api/state");
+    if (resp.status === 401) { location.href = "login"; return; }
+    state = await resp.json();
+  } catch {
+    return; // server down / hiccup — try again next tick
+  }
+  document.getElementById("db-path").textContent = state.db_path || "";
+  document.getElementById("signout").style.display = state.login ? "inline" : "none";
+  renderNodes(state);
+  renderSpawns(state);
+  renderAgents(state);
+  renderMessages(state);
 }
 
 tick();
