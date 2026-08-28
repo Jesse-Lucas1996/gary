@@ -155,14 +155,14 @@ func (r *runner) supervise(ctx context.Context, sp *Spawn) {
 				return
 			}
 			fmt.Fprintf(os.Stderr, "gary node: %s: %v\n", sp.Agent, err)
-			r.reply(sp.Agent, m.From, fmt.Sprintf("agent %q failed to handle your message: %v", sp.Agent, err))
+			r.answer(sp.Agent, m, fmt.Sprintf("agent %q failed to handle your message: %v", sp.Agent, err))
 			continue
 		}
 		if newSession != "" && newSession != session {
 			session = newSession
 			_ = r.b.UpdateSpawn(sp.ID, "", session, 0, "")
 		}
-		r.reply(sp.Agent, m.From, out)
+		r.answer(sp.Agent, m, out)
 	}
 
 	if asked.Load() {
@@ -208,7 +208,7 @@ func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message
 	}
 	cmd := exec.CommandContext(ctx, r.claudeBin, args...)
 	cmd.Dir = sp.Repo
-	cmd.Stdin = strings.NewReader(fmt.Sprintf("Message from agent %q:\n\n%s", m.From, m.Body))
+	cmd.Stdin = strings.NewReader(inbound(m))
 	cmd.Stderr = os.Stderr
 	raw, err := cmd.Output()
 	if err != nil {
@@ -233,10 +233,15 @@ func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message
 func systemPrompt(sp *Spawn) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are the gary agent %q, running on node %q.\n\n", sp.Agent, sp.Node)
-	b.WriteString("Each message you receive is from another agent. Your final response is " +
-		"sent back to whoever messaged you, so answer with the result itself — not a status update.\n\n")
+	b.WriteString("Each message you receive is from another agent. Some ask for an answer back " +
+		"and some do not; each one tells you which it is.\n\n")
 	fmt.Fprintf(&b, "To reach another agent: `gary send <them> --from %s \"<request>\"`. "+
-		"`gary list` shows who exists.\n\n", sp.Agent)
+		"Add `--expect-reply` only when you genuinely cannot continue without their answer: it "+
+		"turns their result into a new message to you and costs them a turn. `gary list` shows "+
+		"who exists.\n\n", sp.Agent)
+	fmt.Fprintf(&b, "To reach a whole channel: `gary post <channel> --from %s \"<update>\"`. "+
+		"`gary channels` shows which exist and who is on each. A post never asks for a reply and "+
+		"reaches every member, costing each of them a turn.\n\n", sp.Agent)
 	b.WriteString("Message only when the recipient must act or must know something to do their job. " +
 		"Never send thanks, acknowledgements, or confirmations — reading a message already acks it, " +
 		"and gary rejects pleasantry-only messages.\n")
@@ -246,11 +251,47 @@ func systemPrompt(sp *Spawn) string {
 	return b.String()
 }
 
+// inbound frames a message for the turn, including whether the agent's final
+// response is going anywhere. Agents pad status updates when they assume someone
+// is listening; telling them nobody is keeps the turn's output honest.
+func inbound(m *Message) string {
+	head := fmt.Sprintf("Message from agent %q", m.From)
+	note := "No reply is expected: your final response will not be sent to anyone. Act on this " +
+		"message, and message someone yourself only if they need something from you."
+	if m.ExpectsReply {
+		note = fmt.Sprintf("%s is waiting on your answer: your final response is sent back to them, "+
+			"so answer with the result itself — not a status update.", m.From)
+	}
+	if m.Channel != "" {
+		head = fmt.Sprintf("Message from agent %q on channel %q, which went to every member", m.From, m.Channel)
+		note += fmt.Sprintf(" In particular, do not post to %q just because you received this: "+
+			"a post costs every member a turn, so post only what all of them need.", m.Channel)
+	}
+	return fmt.Sprintf("%s:\n\n%s\n\n---\n%s", head, m.Body, note)
+}
+
+// answer routes a turn's result. It goes back to the sender only if that sender
+// asked for it; otherwise the turn ends here and the result is printed for the
+// operator. This is invariant 10, and it is what stops two agents volleying
+// forever: an unrequested result never becomes another agent's inbound message.
+func (r *runner) answer(agent string, m *Message, body string) {
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	if !m.ExpectsReply {
+		fmt.Printf("gary node: %s finished #%d from %s (no reply expected):\n%s\n", agent, m.ID, m.From, body)
+		return
+	}
+	r.reply(agent, m.From, body)
+}
+
 func (r *runner) reply(from, to, body string) {
 	if strings.TrimSpace(body) == "" {
 		return
 	}
-	_, err := r.b.Send(from, to, body)
+	// false is load-bearing: a reply never expects a reply, so a turn's output
+	// can never cause another turn.
+	_, err := r.b.Send(from, to, body, false)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrGuard):

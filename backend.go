@@ -13,11 +13,18 @@ type Backend interface {
 	RegisterOn(name, desc, node string) error
 	Unregister(name string) error
 	List() ([]Agent, error)
-	Send(from, to, body string) (int64, error)
+	Send(from, to, body string, expectsReply bool) (int64, error)
 	Inbox(name string) ([]Message, error)
 	Recv(name string) (*Message, error)
 	RecvWait(ctx context.Context, name string, d time.Duration) (*Message, error)
 	Recent(limit int) ([]Message, error)
+
+	CreateChannel(name, desc string) error
+	DeleteChannel(name string) error
+	JoinChannel(channel, agent string) error
+	LeaveChannel(channel, agent string) error
+	Channels() ([]Channel, error)
+	Post(from, channel, body string) ([]int64, error)
 
 	Heartbeat(name, version string) error
 	Nodes() ([]Node, error)

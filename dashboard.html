@@ -2,73 +2,292 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gary dashboard</title>
 <style>
-  body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 2rem; background: #0b0b0c; color: #ddd; }
-  h1 { font-size: 1.1rem; color: #888; font-weight: 500; }
-  h1 code { color: #ddd; }
-  h1 .signout { float: right; color: #666; font-size: .8rem; text-decoration: none; }
-  h1 .signout:hover { color: #d76b6b; }
-  h2 { font-size: .8rem; color: #777; font-weight: 500; text-transform: uppercase;
-       letter-spacing: .08em; margin: 1.6rem 0 .5rem; }
+  :root {
+    --bg: #0a0a0c;
+    --surface: #131317;
+    --surface-2: #191920;
+    --line: #26262f;
+    --line-soft: #1d1d24;
+    --text: #e7e7ec;
+    --dim: #8b8b98;
+    --faint: #5c5c69;
+    --accent: #7aa2f7;
+    --accent-soft: #1e2a45;
+    --green: #7cd992;
+    --amber: #e9b949;
+    --cyan: #59c2d6;
+    --red: #f0717a;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  ::selection { background: var(--accent-soft); }
+
+  /* ---------- scrollbars ---------- */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2b2b34; border-radius: 999px; border: 3px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a46; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 1rem;
+    padding: .7rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+    background: rgba(19,19,23,.75);
+    backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 600; letter-spacing: -.01em; }
+  .brand .dbpath { font: 400 .78rem/1 var(--mono); color: var(--faint); margin-left: .6rem; }
+  .spacer { flex: 1; }
+  .pulse { display: flex; gap: .45rem; align-items: center; color: var(--dim); font-size: .8rem; }
+  .dot { width: .5rem; height: .5rem; border-radius: 999px; background: var(--faint); flex: none; }
+  .dot.up { background: var(--green); box-shadow: 0 0 0 3px rgba(124,217,146,.14); }
+  .dot.stale { background: var(--red); box-shadow: 0 0 0 3px rgba(240,113,122,.14); }
+  .signout { color: var(--faint); font-size: .8rem; text-decoration: none; }
+  .signout:hover { color: var(--red); }
+
+  /* ---------- tabs ---------- */
+  nav.tabs { display: flex; gap: .25rem; padding: .55rem 1.25rem 0; border-bottom: 1px solid var(--line); }
+  .tab {
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--dim); padding: .45rem .8rem .6rem; cursor: pointer;
+    border-radius: 6px 6px 0 0; transition: color .15s, background .15s, border-color .15s;
+  }
+  .tab:hover { color: var(--text); background: var(--surface); }
+  .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .count {
+    margin-left: .45rem; font-size: .72rem; color: var(--faint);
+    background: var(--surface-2); border-radius: 999px; padding: .05rem .45rem;
+  }
+  .tab.on .count { color: var(--accent); background: var(--accent-soft); }
+
+  /* ---------- panels ---------- */
+  main { flex: 1; min-height: 0; }
+  .panel { display: none; height: 100%; }
+  .panel.on { display: block; }
+  .pad { padding: 1.25rem; overflow-y: auto; height: 100%; }
+  h2 {
+    font-size: .74rem; color: var(--faint); font-weight: 600; text-transform: uppercase;
+    letter-spacing: .09em; margin: 0 0 .7rem;
+  }
+  h2:not(:first-child) { margin-top: 1.8rem; }
+  .empty { color: var(--faint); padding: 1rem 0; }
+  .empty code, .hint code { font: .82rem var(--mono); color: var(--dim); background: var(--surface-2);
+                            padding: .1rem .35rem; border-radius: 4px; }
+  .mono { font-family: var(--mono); font-size: .84rem; color: var(--dim); }
+
+  /* ---------- rooms ---------- */
+  .rooms { display: grid; grid-template-columns: 250px 1fr; height: 100%; min-height: 0; }
+  .roomlist { border-right: 1px solid var(--line); overflow-y: auto; padding: .8rem; }
+  .roomlist .head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 .5rem .6rem; }
+  .roomlist .head h2 { margin: 0; }
+  .roomitem {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    padding: .5rem .6rem; border-radius: 8px; cursor: pointer; margin-bottom: .15rem;
+    transition: background .12s, color .12s;
+  }
+  .roomitem:hover { background: var(--surface); }
+  .roomitem.on { background: var(--accent-soft); }
+  .roomitem .name { font-weight: 500; }
+  .roomitem.on .name { color: var(--accent); }
+  .roomitem .meta { display: block; color: var(--faint); font-size: .76rem; margin-top: .1rem; }
+
+  .room { display: flex; flex-direction: column; min-height: 0; }
+  .roomhead { padding: .85rem 1.25rem; border-bottom: 1px solid var(--line); }
+  .roomhead .title { font-weight: 600; }
+  .roomhead .desc { color: var(--dim); font-size: .84rem; margin-left: .5rem; }
+  .roomhead .members { margin-top: .45rem; display: flex; gap: .35rem; flex-wrap: wrap; }
+  .transcript { flex: 1; overflow-y: auto; padding: 1.25rem; display: flex; flex-direction: column; gap: .9rem; }
+
+  .post { display: flex; gap: .7rem; animation: rise .25s ease-out; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    display: grid; place-items: center; font-size: .8rem; font-weight: 600; color: #0a0a0c;
+  }
+  .post .col { min-width: 0; flex: 1; }
+  .post .who { display: flex; align-items: baseline; gap: .5rem; }
+  .post .who .name { font-weight: 600; }
+  .post .who .when, .post .who .fan { color: var(--faint); font-size: .76rem; }
+  .bubble {
+    margin-top: .25rem; background: var(--surface); border: 1px solid var(--line-soft);
+    border-radius: 4px 10px 10px 10px; padding: .6rem .8rem; max-width: 52rem;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .post.mine .bubble { background: var(--accent-soft); border-color: #2c3d61; }
+
+  .composer { border-top: 1px solid var(--line); padding: .8rem 1.25rem 1rem; }
+  .composer textarea {
+    width: 100%; min-height: 62px; max-height: 220px; resize: vertical;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: .65rem .8rem; outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  .composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,247,.13); }
+  .composer textarea:disabled { opacity: .5; cursor: not-allowed; }
+  .composer .foot { display: flex; align-items: center; justify-content: space-between; margin-top: .5rem; gap: 1rem; }
+  .hint { color: var(--faint); font-size: .78rem; }
+  .hint.bad { color: var(--red); }
+  .send {
+    background: var(--accent); border: 0; color: #0a0a0c; font-weight: 600;
+    padding: .45rem 1rem; border-radius: 8px; cursor: pointer; transition: filter .15s, opacity .15s;
+  }
+  .send:hover:not(:disabled) { filter: brightness(1.1); }
+  .send:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ---------- chips ---------- */
   .chips { display: flex; gap: .5rem; flex-wrap: wrap; }
-  .chip { border: 1px solid #333; border-radius: 6px; padding: .3rem .6rem; }
-  .agent { cursor: pointer; }
-  .agent.active { border-color: #6cc06c; color: #6cc06c; }
-  .chip .badge { background: #b58900; color: #000; border-radius: 999px; padding: 0 .5rem;
-                 margin-left: .4rem; font-size: .8rem; }
-  .chip .sub { color: #666; font-size: .8rem; margin-left: .4rem; }
-  .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 999px; margin-right: .4rem; }
-  .dot.up { background: #6cc06c; }
-  .dot.stale { background: #b04a4a; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .4rem;
+    border: 1px solid var(--line); border-radius: 999px; padding: .28rem .7rem;
+    background: var(--surface); font-size: .84rem;
+  }
+  .chip.sm { padding: .12rem .55rem; font-size: .76rem; color: var(--dim); }
+  .chip.click { cursor: pointer; transition: border-color .15s, color .15s, background .15s; }
+  .chip.click:hover { border-color: #3b3b47; }
+  .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .chip .sub { color: var(--faint); font-size: .78rem; }
+  .badge {
+    background: var(--amber); color: #17130a; border-radius: 999px;
+    padding: 0 .42rem; font-size: .74rem; font-weight: 600;
+  }
+
+  /* ---------- tables ---------- */
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; color: #888; font-weight: 500; padding: .3rem .6rem; border-bottom: 1px solid #333; }
-  td { padding: .4rem .6rem; border-bottom: 1px solid #1e1e1e; vertical-align: top; }
-  tr.new { animation: flash 1.2s ease-out; }
-  @keyframes flash { from { background: #24361f; } to { background: transparent; } }
-  .status { padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; white-space: nowrap; }
-  .status.pending, .status.queued  { background: #4a3a12; color: #e8b84b; }
-  .status.acked, .status.running   { background: #163a1f; color: #6cc06c; }
-  .status.claimed, .status.stopping { background: #123240; color: #5aa8c6; }
-  .status.failed                   { background: #3d1919; color: #d76b6b; }
-  .status.stopped                  { background: #242424; color: #999; }
-  .body { max-width: 42rem; white-space: pre-wrap; word-break: break-word; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; color: #999; }
-  .empty { color: #666; padding: 1rem; }
-  button.stop { background: none; border: 1px solid #444; color: #999; border-radius: 4px;
-                padding: .1rem .5rem; font-size: .75rem; cursor: pointer; }
-  button.stop:hover { border-color: #b04a4a; color: #d76b6b; }
+  th {
+    text-align: left; color: var(--faint); font-weight: 600; font-size: .72rem;
+    text-transform: uppercase; letter-spacing: .06em;
+    padding: .55rem .8rem; border-bottom: 1px solid var(--line); background: var(--surface-2);
+  }
+  td { padding: .55rem .8rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .12s; }
+  tbody tr:hover { background: var(--surface-2); }
+  tr.new { animation: flash 1.4s ease-out; }
+  @keyframes flash { from { background: rgba(122,162,247,.16); } to { background: transparent; } }
+  .status { padding: .1rem .55rem; border-radius: 999px; font-size: .74rem; white-space: nowrap; font-weight: 500; }
+  .status.pending, .status.queued   { background: #3d3113; color: var(--amber); }
+  .status.acked, .status.running    { background: #14331d; color: var(--green); }
+  .status.claimed, .status.stopping { background: #102c38; color: var(--cyan); }
+  .status.failed                    { background: #38161a; color: var(--red); }
+  .status.stopped                   { background: #24242b; color: var(--dim); }
+  .body { max-width: 44rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tag { font-size: .74rem; color: var(--accent); background: var(--accent-soft);
+         border-radius: 4px; padding: .05rem .35rem; }
+  .stop {
+    background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 6px;
+    padding: .12rem .55rem; font-size: .76rem; cursor: pointer; transition: border-color .15s, color .15s;
+  }
+  .stop:hover { border-color: var(--red); color: var(--red); }
+
+  @media (max-width: 720px) {
+    .rooms { grid-template-columns: 1fr; }
+    .roomlist { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
+  }
 </style>
 </head>
 <body>
-<h1>gary — watching <code id="db-path">…</code><a class="signout" id="signout" href="logout">sign out</a></h1>
 
-<h2>machines</h2>
-<div class="chips" id="nodes"></div>
-<div class="empty" id="nodes-empty" style="display:none">no nodes — run <code>gary node</code> on a machine</div>
+<header>
+  <div class="brand">gary<span class="dbpath" id="db-path"></span></div>
+  <div class="spacer"></div>
+  <div class="pulse" id="pulse"></div>
+  <a class="signout" id="signout" href="logout">sign out</a>
+</header>
 
-<h2>live agents</h2>
-<table>
-  <thead><tr><th>agent</th><th>node</th><th>status</th><th>repo</th><th>model</th><th>queue</th><th>started</th><th></th></tr></thead>
-  <tbody id="spawns"></tbody>
-</table>
-<div class="empty" id="spawns-empty" style="display:none">no spawned agents — <code>gary spawn &lt;name&gt; --node &lt;machine&gt; --repo &lt;path&gt;</code></div>
+<nav class="tabs">
+  <button class="tab on" data-tab="rooms">Rooms<span class="count" id="c-rooms"></span></button>
+  <button class="tab" data-tab="inbox">Inbox<span class="count" id="c-inbox"></span></button>
+  <button class="tab" data-tab="agents">Agents<span class="count" id="c-agents"></span></button>
+</nav>
 
-<h2>agents</h2>
-<div class="chips" id="agents"></div>
+<main>
+  <section class="panel on" id="p-rooms">
+    <div class="rooms">
+      <aside class="roomlist">
+        <div class="head"><h2>channels</h2></div>
+        <div id="room-list"></div>
+      </aside>
+      <div class="room">
+        <div class="roomhead" id="room-head"></div>
+        <div class="transcript" id="transcript"></div>
+        <form class="composer" id="composer">
+          <textarea id="compose" rows="2" placeholder="Write to the channel…"></textarea>
+          <div class="foot">
+            <span class="hint" id="compose-hint"></span>
+            <button type="submit" class="send" id="compose-send">Post</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </section>
 
-<h2>messages</h2>
-<table>
-  <thead><tr><th>id</th><th>from</th><th>to</th><th>status</th><th>when</th><th>body</th></tr></thead>
-  <tbody id="messages"></tbody>
-</table>
-<div class="empty" id="empty" style="display:none">no messages yet</div>
+  <section class="panel" id="p-inbox">
+    <div class="pad">
+      <h2>filter by agent</h2>
+      <div class="chips" id="agents-filter"></div>
+      <h2>messages</h2>
+      <div class="card" id="messages-card">
+        <table>
+          <thead><tr><th>id</th><th>from</th><th>to</th><th>status</th><th>when</th><th>body</th></tr></thead>
+          <tbody id="messages"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="messages-empty" style="display:none">no messages yet</div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-agents">
+    <div class="pad">
+      <h2>machines</h2>
+      <div class="chips" id="nodes"></div>
+      <div class="empty" id="nodes-empty" style="display:none">no nodes — run <code>gary node</code> on a machine</div>
+
+      <h2>live agents</h2>
+      <div class="card" id="spawns-card">
+        <table>
+          <thead><tr><th>agent</th><th>node</th><th>status</th><th>repo</th><th>model</th><th>queue</th><th>started</th><th></th></tr></thead>
+          <tbody id="spawns"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="spawns-empty" style="display:none">no spawned agents — <code>gary spawn &lt;name&gt; --node &lt;machine&gt; --repo &lt;path&gt;</code></div>
+
+      <h2>registry</h2>
+      <div class="chips" id="agents-all"></div>
+    </div>
+  </section>
+</main>
 
 <script>
-// ponytail: 1s polling, no websocket/SSE — SQLite has no notify, this is the same
-// tradeoff `gary watch` makes. Fine at dashboard scale; revisit if polling load matters.
+// ponytail: 1s polling, no websocket/SSE — SQLite has no notify, and this is the
+// same tradeoff `gary watch` makes. Fine at dashboard scale.
 const seen = new Set();
-let selected = null; // ponytail: in-memory filter, add URL param if deep-linking matters
+let state = {};
+const TABS = ["rooms", "inbox", "agents"];
+let tab = location.hash.replace("#", "") || localStorage.getItem("gary.tab") || "rooms";
+if (!TABS.includes(tab)) tab = "rooms";
+let room = localStorage.getItem("gary.room") || null;
+let selected = null;          // inbox filter, in memory only
+let firstPaint = true;
+
+const $ = id => document.getElementById(id);
+const H = {"Content-Type": "application/json"};
 
 function ago(unixSeconds) {
   const s = Math.round(Date.now() / 1000 - unixSeconds);
@@ -78,97 +297,260 @@ function ago(unixSeconds) {
   return Math.floor(s / 86400) + "d ago";
 }
 
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// Stable per-name colour so an agent looks the same everywhere.
+function hue(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+function avatar(name) {
+  const h = hue(name);
+  return `<div class="avatar" style="background:hsl(${h} 55% 62%)">${esc(String(name)[0] || "?").toUpperCase()}</div>`;
+}
+
+// Only touch the DOM when the markup actually changed, so hover, text selection
+// and the flash animation survive the 1s poll.
+const painted = new Map();
+function paint(id, html) {
+  if (painted.get(id) === html) return;
+  painted.set(id, html);
+  $(id).innerHTML = html;
 }
 
 const LIVE = new Set(["queued", "claimed", "running", "stopping"]);
 
-async function stopAgent(name) {
-  if (!confirm(`Stop agent "${name}" after its current turn?`)) return;
-  await fetch("v1/spawns/stop", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({Agent: name}),
-  });
-  tick();
+/* ---------------- rooms ---------------- */
+
+// A post is one row per member, so collapse the fan-out back into one entry.
+function roomPosts(channel) {
+  const groups = new Map();
+  for (const m of state.messages || []) {
+    if (m.channel !== channel) continue;
+    const key = `${m.from}|${m.created_at}|${m.body}`;
+    const g = groups.get(key);
+    if (g) { g.to.push(m.to); g.id = Math.min(g.id, m.id); }
+    else groups.set(key, {id: m.id, from: m.from, body: m.body, created_at: m.created_at, to: [m.to]});
+  }
+  return [...groups.values()].sort((a, b) => a.id - b.id);
 }
 
-function renderNodes(state) {
-  const staleAfter = state.stale_after || 90;
-  const now = Date.now() / 1000;
-  const nodes = state.nodes || [];
-  document.getElementById("nodes-empty").style.display = nodes.length ? "none" : "block";
-  document.getElementById("nodes").innerHTML = nodes.map(n => {
-    const live = (now - n.last_seen) < staleAfter;
-    const agents = (state.spawns || []).filter(s => s.node === n.name && LIVE.has(s.status)).length;
-    return `<div class="chip">
-      <span class="dot ${live ? "up" : "stale"}"></span>${escapeHtml(n.name)}
-      <span class="sub">${agents} agent${agents === 1 ? "" : "s"} · ${live ? ago(n.last_seen) : "stale, " + ago(n.last_seen)}</span>
+function renderRoomList() {
+  const chans = state.channels || [];
+  if (chans.length && !chans.some(c => c.name === room)) room = chans[0].name;
+  if (!chans.length) room = null;
+  paint("room-list", chans.length ? chans.map(c => {
+    const n = roomPosts(c.name).length;
+    return `<button class="roomitem ${c.name === room ? "on" : ""}" data-room="${esc(c.name)}">
+      <span class="name">#${esc(c.name)}</span>
+      <span class="meta">${(c.members || []).length} member${(c.members || []).length === 1 ? "" : "s"} · ${n} post${n === 1 ? "" : "s"}</span>
+    </button>`;
+  }).join("") : `<div class="empty">no channels yet<br><br><code>gary channel new standup</code></div>`);
+  document.querySelectorAll(".roomitem").forEach(el => {
+    el.onclick = () => { room = el.dataset.room; localStorage.setItem("gary.room", room); render(); };
+  });
+}
+
+function renderRoom() {
+  const chan = (state.channels || []).find(c => c.name === room);
+  if (!chan) {
+    paint("room-head", "");
+    paint("transcript", `<div class="empty">Create a channel and put agents on it:<br><br>
+      <code>gary channel new standup --description "daily status"</code><br>
+      <code>gary channel join standup --agent coder</code></div>`);
+    setComposer(null);
+    return;
+  }
+  paint("room-head", `
+    <div><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span></div>
+    <div class="members">${(chan.members || []).map(m =>
+      `<span class="chip sm">${esc(m)}</span>`).join("") || `<span class="hint">nobody has joined yet</span>`}</div>`);
+
+  const posts = roomPosts(chan.name);
+  const el = $("transcript");
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  paint("transcript", posts.length ? posts.map(p => {
+    const isNew = !seen.has(p.id);
+    seen.add(p.id);
+    return `<div class="post ${p.from === state.me ? "mine" : ""}" ${isNew ? "" : 'style="animation:none"'}>
+      ${avatar(p.from)}
+      <div class="col">
+        <div class="who">
+          <span class="name">${esc(p.from)}</span>
+          <span class="when">${ago(p.created_at)}</span>
+          <span class="fan">→ ${p.to.length} agent${p.to.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="bubble">${esc(p.body)}</div>
+      </div>
     </div>`;
-  }).join("");
+  }).join("") : `<div class="empty">nothing posted to #${esc(chan.name)} yet</div>`);
+  if (atBottom || firstPaint) el.scrollTop = el.scrollHeight;
+  setComposer(chan);
 }
 
-function renderSpawns(state) {
-  const live = (state.spawns || []).filter(s => LIVE.has(s.status));
-  document.getElementById("spawns-empty").style.display = live.length ? "none" : "block";
-  document.getElementById("spawns").innerHTML = live.map(s => {
-    const pending = (state.messages || []).filter(m => m.to === s.agent && m.status === "pending").length;
-    const stop = state.api
-      ? `<button class="stop" data-agent="${escapeHtml(s.agent)}">stop</button>`
-      : "";
-    return `<tr>
-      <td>${escapeHtml(s.agent)}</td>
-      <td>${escapeHtml(s.node)}</td>
-      <td><span class="status ${s.status}">${s.status}</span></td>
-      <td class="mono">${escapeHtml(s.repo)}</td>
-      <td class="mono">${escapeHtml(s.model || "default")}</td>
-      <td>${pending ? `<span class="badge">${pending}</span> waiting` : "idle"}</td>
-      <td>${ago(s.created_at)}</td>
-      <td>${stop}</td>
-    </tr>`;
-  }).join("");
-  document.querySelectorAll("button.stop").forEach(el => {
-    el.onclick = () => stopAgent(el.dataset.agent);
-  });
+function setComposer(chan) {
+  const box = $("compose"), send = $("compose-send"), hint = $("compose-hint");
+  const ok = !!chan && state.api;
+  box.disabled = send.disabled = !ok;
+  box.placeholder = chan ? `Message #${chan.name}…` : "";
+  if (hint.classList.contains("bad")) return;   // leave an error up until the next send
+  hint.textContent = "";
+  if (!chan) return;
+  if (!state.api) hint.innerHTML = `read-only view — run <code>gary serve</code> to post`;
+  else hint.innerHTML = `posting as <b>${esc(state.me)}</b> · Enter to send, Shift+Enter for a newline`;
 }
 
-function renderAgents(state) {
-  const el = document.getElementById("agents");
-  el.innerHTML = (state.agents || []).map(a => {
+async function post(channel, body) {
+  // The sender has to be a registered agent (invariant 3), so claim the name first.
+  const reg = await fetch("v1/register", {method: "POST", headers: H,
+    body: JSON.stringify({Name: state.me, Description: "dashboard"})});
+  if (!reg.ok) throw new Error((await reg.json().catch(() => ({}))).error || "could not register as " + state.me);
+  const resp = await fetch("v1/post", {method: "POST", headers: H,
+    body: JSON.stringify({From: state.me, Channel: channel, Body: body})});
+  if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || "post failed");
+}
+
+async function submit(e) {
+  e.preventDefault();
+  const box = $("compose"), hint = $("compose-hint");
+  const body = box.value.trim();
+  if (!body || !room) return;
+  box.disabled = $("compose-send").disabled = true;
+  try {
+    await post(room, body);
+    box.value = "";
+    hint.classList.remove("bad");
+    hint.textContent = "";
+  } catch (err) {
+    // The etiquette guard lands here: a pleasantry-only post is refused, and the
+    // person typing should see why rather than watch it vanish.
+    hint.classList.add("bad");
+    hint.textContent = String(err.message || err);
+  } finally {
+    box.disabled = $("compose-send").disabled = false;
+    box.focus();
+    tick();
+  }
+}
+
+/* ---------------- inbox ---------------- */
+
+function renderInbox() {
+  const el = $("agents-filter");
+  paint("agents-filter", (state.agents || []).map(a => {
     const pending = (state.messages || []).filter(m => m.to === a.name && m.status === "pending").length;
-    const active = a.name === selected ? " active" : "";
-    const where = a.node ? `<span class="sub">${escapeHtml(a.node)}</span>` : "";
-    return `<div class="chip agent${active}" data-name="${escapeHtml(a.name)}">${escapeHtml(a.name)}${where}${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
-  }).join("");
-  el.querySelectorAll(".agent").forEach(node => {
+    return `<div class="chip click ${a.name === selected ? "on" : ""}" data-name="${esc(a.name)}">
+      ${esc(a.name)}${a.node ? `<span class="sub">${esc(a.node)}</span>` : ""}
+      ${pending ? `<span class="badge">${pending}</span>` : ""}</div>`;
+  }).join("") || `<span class="hint">no agents registered</span>`);
+  el.querySelectorAll(".chip.click").forEach(node => {
     node.onclick = () => {
-      const name = node.dataset.name;
-      selected = selected === name ? null : name;
-      tick();
+      selected = selected === node.dataset.name ? null : node.dataset.name;
+      render();
     };
   });
-}
 
-function renderMessages(state) {
   const msgs = (state.messages || []).filter(m => !selected || m.from === selected || m.to === selected);
-  document.getElementById("empty").style.display = msgs.length ? "none" : "block";
-  document.getElementById("messages").innerHTML = msgs.map(m => {
+  $("messages-empty").style.display = msgs.length ? "none" : "block";
+  $("messages-card").style.display = msgs.length ? "" : "none";
+  paint("messages", msgs.map(m => {
     const isNew = !seen.has(m.id);
     seen.add(m.id);
     return `<tr class="${isNew ? "new" : ""}">
-      <td>#${m.id}</td>
-      <td>${escapeHtml(m.from)}</td>
-      <td>${escapeHtml(m.to)}</td>
-      <td><span class="status ${m.status}">${m.status}</span></td>
+      <td class="mono">#${m.id}</td>
+      <td>${esc(m.from)}</td>
+      <td>${esc(m.to)}${m.channel ? ` <span class="tag">#${esc(m.channel)}</span>` : ""}</td>
+      <td><span class="status ${m.status}">${m.status}</span>${m.expects_reply ? ` <span class="tag">wants reply</span>` : ""}</td>
       <td>${ago(m.created_at)}</td>
-      <td class="body">${escapeHtml(m.body)}</td>
+      <td class="body">${esc(m.body)}</td>
     </tr>`;
-  }).join("");
+  }).join(""));
+}
+
+/* ---------------- agents ---------------- */
+
+async function stopAgent(name) {
+  if (!confirm(`Stop agent "${name}" after its current turn?`)) return;
+  await fetch("v1/spawns/stop", {method: "POST", headers: H, body: JSON.stringify({Agent: name})});
+  tick();
+}
+
+function renderAgents() {
+  const staleAfter = state.stale_after || 90;
+  const now = Date.now() / 1000;
+  const nodes = state.nodes || [];
+  $("nodes-empty").style.display = nodes.length ? "none" : "block";
+  paint("nodes", nodes.map(n => {
+    const live = (now - n.last_seen) < staleAfter;
+    const count = (state.spawns || []).filter(s => s.node === n.name && LIVE.has(s.status)).length;
+    return `<div class="chip"><span class="dot ${live ? "up" : "stale"}"></span>${esc(n.name)}
+      <span class="sub">${count} agent${count === 1 ? "" : "s"} · ${live ? ago(n.last_seen) : "stale, " + ago(n.last_seen)}</span></div>`;
+  }).join(""));
+
+  const live = (state.spawns || []).filter(s => LIVE.has(s.status));
+  $("spawns-empty").style.display = live.length ? "none" : "block";
+  $("spawns-card").style.display = live.length ? "" : "none";
+  paint("spawns", live.map(s => {
+    const pending = (state.messages || []).filter(m => m.to === s.agent && m.status === "pending").length;
+    return `<tr>
+      <td>${esc(s.agent)}</td>
+      <td>${esc(s.node)}</td>
+      <td><span class="status ${s.status}">${s.status}</span></td>
+      <td class="mono">${esc(s.repo)}</td>
+      <td class="mono">${esc(s.model || "default")}</td>
+      <td>${pending ? `<span class="badge">${pending}</span> waiting` : "idle"}</td>
+      <td>${ago(s.created_at)}</td>
+      <td>${state.api ? `<button class="stop" data-agent="${esc(s.agent)}">stop</button>` : ""}</td>
+    </tr>`;
+  }).join(""));
+  document.querySelectorAll("button.stop").forEach(el => {
+    el.onclick = () => stopAgent(el.dataset.agent);
+  });
+
+  paint("agents-all", (state.agents || []).map(a =>
+    `<div class="chip">${esc(a.name)}${a.node ? `<span class="sub">${esc(a.node)}</span>` : ""}
+      <span class="sub">${ago(a.last_seen)}</span></div>`).join("")
+    || `<span class="hint">no agents registered</span>`);
+}
+
+/* ---------------- shell ---------------- */
+
+function setTab(name) {
+  tab = name;
+  localStorage.setItem("gary.tab", name);
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("on", p.id === "p-" + name));
+  if (name === "rooms") $("compose").focus();
+}
+
+function render() {
+  $("db-path").textContent = state.db_path || "";
+  $("signout").style.display = state.login ? "inline" : "none";
+
+  const nodes = state.nodes || [];
+  const staleAfter = state.stale_after || 90, now = Date.now() / 1000;
+  const up = nodes.filter(n => now - n.last_seen < staleAfter).length;
+  const running = (state.spawns || []).filter(s => LIVE.has(s.status)).length;
+  paint("pulse", `<span class="dot ${nodes.length && up ? "up" : "stale"}"></span>
+    ${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running} agent${running === 1 ? "" : "s"} running`);
+
+  $("c-rooms").textContent = (state.channels || []).length;
+  $("c-inbox").textContent = (state.messages || []).filter(m => m.status === "pending").length;
+  $("c-agents").textContent = (state.agents || []).length;
+
+  renderRoomList();
+  renderRoom();
+  renderInbox();
+  renderAgents();
+  firstPaint = false;
 }
 
 async function tick() {
-  let state;
   try {
     const resp = await fetch("api/state");
     if (resp.status === 401) { location.href = "login"; return; }
@@ -176,14 +558,20 @@ async function tick() {
   } catch {
     return; // server down / hiccup — try again next tick
   }
-  document.getElementById("db-path").textContent = state.db_path || "";
-  document.getElementById("signout").style.display = state.login ? "inline" : "none";
-  renderNodes(state);
-  renderSpawns(state);
-  renderAgents(state);
-  renderMessages(state);
+  render();
 }
 
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.tab));
+addEventListener("hashchange", () => {
+  const want = location.hash.replace("#", "");
+  if (TABS.includes(want) && want !== tab) setTab(want);
+});
+$("composer").onsubmit = submit;
+$("compose").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(e); }
+});
+
+setTab(tab);
 tick();
 setInterval(tick, 1000);
 </script>

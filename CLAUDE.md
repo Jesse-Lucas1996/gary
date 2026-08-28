@@ -15,8 +15,12 @@ process (`gary serve`) owns that file and the others talk to it over HTTP.
   puts it in the registry so others can discover and address it. Names are flat
   and global: one name, one agent, wherever it runs.
 - **Mailbox** — every agent has one inbox queue. Messages are delivered FIFO.
-- **Message** — one envelope: `from`, `to`, `body`, timestamps, and a lifecycle
-  status (`pending → acked`).
+- **Message** — one envelope: `from`, `to`, `body`, timestamps, a lifecycle
+  status (`pending → acked`), and whether the sender wants an answer back
+  (`expects_reply`).
+- **Channel** — a named address that expands to a member list. `post` fans one
+  body out into every member's mailbox. It is a fan-out, not a second kind of
+  queue: what lands is ordinary mail, tagged with the channel it came from.
 - **Hub** — the process running `gary serve`. It owns the SQLite file and is the
   single serializer for every operation.
 - **Node** — a machine running `gary node`. It claims spawn requests aimed at it
@@ -50,9 +54,16 @@ gary register <name> [--description <text>]   add/update an agent in the registr
 gary unregister <name>                        remove an agent (and its queue)
 gary list                                     show registered agents
 gary send <to> --from <me> [message]          enqueue a message (body from arg or stdin)
+    --expect-reply                            ...and have their turn result sent back to you
 gary inbox <name>                             peek pending messages, no dequeue
 gary recv <name>                              dequeue oldest pending (FIFO) and auto-ack
 gary watch <name> [--interval 1s]             block, printing+acking messages as they arrive
+
+gary channel new <name> [--description <t>]   create or update a shared channel
+gary channel rm <name>                        delete a channel
+gary channel join|leave <name> --agent <a>    put an agent on / take it off a channel
+gary channels                                 list channels and their members
+gary post <channel> --from <me> [message]     fan out to every member but the sender
 
 gary serve [--addr 127.0.0.1:4777]            run the hub
 gary token new                                generate the shared secret (agents/nodes)
@@ -114,6 +125,13 @@ started as. That is a compatibility guarantee, not an accident.
    never carries a command, a shell string, or an argument list. This is the line
    between "a queue that can start agents" and "remote code execution as a
    service". Do not add a field that crosses it.
+10. **A reply never expects a reply.** A node sends a turn's result back only if
+    the inbound message set `expects_reply`, and the reply it sends always has
+    `expects_reply = false`. A `post` is likewise always `false`. Turn output can
+    therefore never, by itself, cause another turn — a continuing exchange takes
+    a deliberate new request from an agent. This is the whole loop breaker;
+    without it two spawned agents volley until someone kills them. See Reply
+    gating.
 
 ## Message lifecycle
 
@@ -123,6 +141,9 @@ pending  ── recv (auto-ack) ──▶ acked
 
 - `send` → `pending`
 - `recv` → `acked` (atomically) and returns the body
+
+`expects_reply` rides alongside and never affects this: it changes what the
+*recipient's node does with its result*, not how the message is delivered.
 
 `inbox` shows only `pending`. There is no intermediate `delivered` state — read
 means acknowledged. Deleting old `acked` rows is manual for now (see Deferred:
@@ -141,11 +162,38 @@ Context survives in the Claude session (`--session-id` on the first turn,
 `--resume` after), not in a process held open. That is what makes it crash-safe:
 an interrupted turn leaves the message `pending`.
 
-The agent's result is sent back to whoever messaged it. `gary stop` is
-cooperative: a watcher goroutine polls the spawn's status and cancels only the
-*idle wait*, never the turn's context, so a stop is noticed within seconds while
-a claude already running still finishes. Cancelling the turn context instead
-would kill claude mid-turn, which is exactly what this design refuses to do.
+The agent's result is sent back to whoever messaged it **only if that message
+asked for a reply**; otherwise the turn ends there and the node prints the result
+for the operator (see Reply gating). `gary stop` is cooperative: a watcher
+goroutine polls the spawn's status and cancels only the *idle wait*, never the
+turn's context, so a stop is noticed within seconds while a claude already
+running still finishes. Cancelling the turn context instead would kill claude
+mid-turn, which is exactly what this design refuses to do.
+
+## Reply gating (the loop breaker)
+
+Two spawned agents talking to each other used to run forever. The cause was
+structural, not behavioural: every inbound message ran a turn, and every turn's
+result was sent back to the sender, so A's answer was a message to B, whose
+answer was a message to A, with no exit condition. The pleasantry guard is a
+small deny-pattern and never stood a chance against "I've updated the parser as
+you suggested."
+
+The fix is invariant 10. `send` carries `expects_reply`; `node.answer` routes the
+turn result back only when it is set, and `node.reply` hardcodes `false` on the
+way out. So a request can produce an answer, and an answer produces nothing.
+Anything longer than one round trip has to be an agent deliberately sending a new
+request, which is a decision it makes rather than a loop it falls into.
+
+Two consequences worth keeping:
+
+- **A channel cannot amplify.** `post` writes `expects_reply = 0` for every
+  recipient, so an N-member channel turns one post into N turns and stops. Had
+  posts been repliable, N turns would each have produced N messages.
+- **The agent is told which kind of message it has.** `node.inbound` frames every
+  turn with either "X is waiting on your answer" or "no reply is expected: your
+  final response will not be sent to anyone". Agents pad status updates when they
+  assume someone is listening; saying nobody is keeps the output honest.
 
 ## Message etiquette (the "no thank-you" guard)
 
@@ -225,13 +273,28 @@ CREATE TABLE agents (
 );
 
 CREATE TABLE messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,  -- also the FIFO order key
-    from_agent TEXT NOT NULL,                      -- deliberately NOT a foreign key
-    to_agent   TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
-    body       TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',    -- pending|acked
-    created_at INTEGER NOT NULL,
-    acked_at   INTEGER                             -- set atomically by recv
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,  -- also the FIFO order key
+    from_agent    TEXT NOT NULL,                      -- deliberately NOT a foreign key
+    to_agent      TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    body          TEXT NOT NULL,
+    channel       TEXT NOT NULL DEFAULT '',           -- attribution for a post, '' for a DM
+    expects_reply INTEGER NOT NULL DEFAULT 0,         -- invariant 10
+    status        TEXT NOT NULL DEFAULT 'pending',    -- pending|acked
+    created_at    INTEGER NOT NULL,
+    acked_at      INTEGER                             -- set atomically by recv
+);
+
+CREATE TABLE channels (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE channel_members (
+    channel   TEXT NOT NULL REFERENCES channels(name) ON DELETE CASCADE,
+    agent     TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    joined_at INTEGER NOT NULL,
+    PRIMARY KEY (channel, agent)
 );
 
 CREATE TABLE nodes (
@@ -260,6 +323,11 @@ CREATE TABLE spawns (
 CREATE INDEX idx_inbox ON messages(to_agent, status, id);
 CREATE INDEX idx_claim ON spawns(node, status, id);
 ```
+
+**A channel owns its membership, not its mail.** Deleting a channel cascades the
+membership rows away and leaves every message it already fanned out — by then
+those are ordinary mail in someone's inbox, and `channel` on them is history, not
+a reference. Same reasoning as `from_agent` below.
 
 **`from_agent` has no foreign key, on purpose.** Sent messages outlive their
 sender: unregistering an agent drops its own inbox (that is what `to_agent`'s
@@ -299,7 +367,8 @@ node.go        # the runner: claims spawns, supervises claude
 auth.go        # password hashing, session cookies, login rate limit
 dashboard.html # embedded live view
 login.html     # embedded sign-in page
-store_test.go  # queue semantics against a temp-file DB
+main_test.go   # CLI arg handling that has bitten before (flag reordering)
+store_test.go  # queue semantics, reply gating and channel fan-out, temp-file DB
 server_test.go # the same semantics over HTTP, plus token auth and bind
 auth_test.go   # hashing, sessions, the login flow, lockout, sub-path mounting
 node_test.go   # spawn claiming and claude invocation, against a stub binary
@@ -352,6 +421,13 @@ needs a network or a credential. What the suite must keep covering:
 
 - **Queue semantics** — FIFO order, atomic dequeue + auto-ack under concurrent
   `recv`, send-to-unregistered rejection, the send guard.
+- **Reply gating** — `expects_reply` surviving send/inbox/recv and the wire, a
+  node dropping the result of a turn nobody asked an answer from, and a node's
+  reply never itself expecting one.
+- **Channels** — fan-out to every member but the sender, non-members untouched,
+  posts carrying their channel and never expecting a reply, idempotent
+  create/join, the guard applying to posts, and unregister/delete cascading
+  membership without eating delivered mail.
 - **The same semantics over HTTP** — the remote path re-asserts them through a
   `Client`, and checks a guard rejection still arrives as `ErrGuard`.
 - **Transport** — token auth (401), the bind guard table, long-poll returning
@@ -365,7 +441,8 @@ needs a network or a credential. What the suite must keep covering:
   cwd, `--session-id` on the first turn and `--resume` after, a pleasantry reply
   dropped silently, and one full message→turn→reply round trip.
 - **Migration** — opening a database written by an older schema, preserving ids
-  and FIFO order, and staying idempotent when `migrate()` runs again.
+  and FIFO order, defaulting the added columns, gaining the channel tables, and
+  staying idempotent when `migrate()` runs again.
 
 Test fixtures must never contain a real credential; the repository is public.
 

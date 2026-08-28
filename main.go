@@ -36,9 +36,18 @@ Messaging:
   gary unregister <name>                        remove an agent and its queue
   gary list                                     list registered agents
   gary send <to> --from <me> [message]          enqueue a message (body from arg or stdin)
+      --expect-reply                            ...and have their result sent back to you
   gary inbox <name>                             peek pending messages (no dequeue)
   gary recv <name>                              dequeue oldest pending, auto-ack
   gary watch <name> [--interval 1s]             block, printing messages as they arrive
+
+Channels (one message, every member):
+  gary channel new <name> [--description <t>]   create or update a shared channel
+  gary channel rm <name>                        delete a channel
+  gary channel join <name> --agent <a>          put an agent on a channel
+  gary channel leave <name> --agent <a>         take an agent off a channel
+  gary channels                                 list channels and their members
+  gary post <channel> --from <me> [message]     fan out to every member but you
 
 Cross-machine:
   gary serve [--addr 127.0.0.1:4777]            run the hub: owns the DB, serves the API
@@ -123,11 +132,13 @@ func run(args []string) error {
 
 	case "send":
 		from := fs.String("from", "", "sending agent (required)")
+		expectReply := fs.Bool("expect-reply", false,
+			"have the recipient's result sent back to you as a new message")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: gary send <to> --from <me> [message]")
+			return fmt.Errorf("usage: gary send <to> --from <me> [--expect-reply] [message]")
 		}
 		if *from == "" {
 			return fmt.Errorf("--from is required")
@@ -142,7 +153,7 @@ func run(args []string) error {
 			body = string(b)
 		}
 		return c.with(func(bk Backend) error {
-			id, err := bk.Send(*from, to, body)
+			id, err := bk.Send(*from, to, body, *expectReply)
 			if err != nil {
 				return err
 			}
@@ -222,6 +233,78 @@ func run(args []string) error {
 					fmt.Printf("from %s (#%d):\n%s\n\n", m.From, m.ID, m.Body)
 				}
 			}
+		})
+
+	case "channel":
+		desc := fs.String("description", "", "what the channel is for (channel new)")
+		agent := fs.String("agent", "", "agent to put on or take off it (channel join|leave)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return channelCmd(c, fs.Args(), *desc, *agent)
+
+	case "channels":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		return c.with(func(b Backend) error {
+			chans, err := b.Channels()
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(chans)
+			}
+			if len(chans) == 0 {
+				fmt.Println("(no channels — `gary channel new <name>` creates one)")
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "CHANNEL\tMEMBERS\tDESCRIPTION")
+			for _, ch := range chans {
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", ch.Name, dash(strings.Join(ch.Members, ", ")), ch.Description)
+			}
+			return tw.Flush()
+		})
+
+	case "post":
+		from := fs.String("from", "", "posting agent (required)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: gary post <channel> --from <me> [message]")
+		}
+		if *from == "" {
+			return fmt.Errorf("--from is required")
+		}
+		channel := fs.Arg(0)
+		body := strings.Join(fs.Args()[1:], " ")
+		if body == "" {
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return err
+			}
+			body = string(b)
+		}
+		return c.with(func(b Backend) error {
+			ids, err := b.Post(*from, channel, body)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(map[string]any{"channel": channel, "ids": ids})
+			}
+			if len(ids) == 0 {
+				fmt.Printf("posted to %s — nobody else is on it, so it went nowhere\n", channel)
+				return nil
+			}
+			noun := "recipients"
+			if len(ids) == 1 {
+				noun = "recipient"
+			}
+			fmt.Printf("posted to %s (%d %s)\n", channel, len(ids), noun)
+			return nil
 		})
 
 	case "serve":
@@ -405,6 +488,36 @@ func openUsers() (*userStore, error) {
 	return loadUsers(p)
 }
 
+// channelCmd takes the positionals left after the shared flag set has parsed;
+// every subcommand is `<sub> <name>`, so the flags themselves live on that set
+// and --db/--url/--json keep working here like everywhere else.
+func channelCmd(c conn, args []string, desc, agent string) error {
+	const use = "usage: gary channel new <name> [--description <text>] | gary channel rm <name> | " +
+		"gary channel join|leave <name> --agent <a>"
+	if len(args) != 2 {
+		return fmt.Errorf("%s", use)
+	}
+	sub, name := args[0], args[1]
+	switch sub {
+	case "new":
+		return c.with(func(b Backend) error { return b.CreateChannel(name, desc) })
+	case "rm":
+		return c.with(func(b Backend) error { return b.DeleteChannel(name) })
+	case "join", "leave":
+		if agent == "" {
+			return fmt.Errorf("usage: gary channel %s <name> --agent <a>", sub)
+		}
+		return c.with(func(b Backend) error {
+			if sub == "join" {
+				return b.JoinChannel(name, agent)
+			}
+			return b.LeaveChannel(name, agent)
+		})
+	default:
+		return fmt.Errorf("unknown channel command %q\n\n%s", sub, use)
+	}
+}
+
 func userCmd(args []string) error {
 	users, err := openUsers()
 	if err != nil {
@@ -489,7 +602,9 @@ func signalContext() (context.Context, context.CancelFunc) {
 // next token; every other --flag does.
 // a message word starting with "-" must sit after a "--" terminator.
 func reorder(args []string) []string {
-	boolFlags := map[string]bool{"json": true, "insecure": true, "force": true, "yolo": true}
+	boolFlags := map[string]bool{
+		"json": true, "insecure": true, "force": true, "yolo": true, "expect-reply": true,
+	}
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]

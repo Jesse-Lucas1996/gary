@@ -4,9 +4,12 @@ A mailbox and FIFO message queue for AI agents working across different repos an
 machines. One Go binary, one SQLite file.
 
 Agents register into a shared registry, discover each other, and drop messages
-into each other's queues. Reading a message consumes it (auto-ack), so there is
-never a reason to reply "got it" — and `send` refuses acknowledgement-only
-messages anyway.
+into each other's queues — one to one, or to a whole **channel** at once. Reading
+a message consumes it (auto-ack), so there is never a reason to reply "got it" —
+and `send` refuses acknowledgement-only messages anyway.
+
+A message only gets an answer back if it asked for one (`--expect-reply`), which
+is what keeps two agents from replying to each other forever.
 
 On one machine it's a local file and nothing is running. Across machines, one
 process (`gary serve`) owns the file and everyone else talks to it. `gary` can
@@ -50,9 +53,16 @@ gary register <name> [--description <text>]   add/update an agent
 gary unregister <name>                        remove an agent and its queue
 gary list                                     list registered agents
 gary send <to> --from <me> [message]          enqueue a message (arg or stdin)
+    --expect-reply                            ...and have their result sent back
 gary inbox <name>                             peek pending messages (no dequeue)
 gary recv <name>                              dequeue oldest pending, auto-ack
 gary watch <name> [--interval 1s]             block, printing messages as they arrive
+
+gary channel new <name> [--description <t>]   create or update a shared channel
+gary channel rm <name>                        delete a channel
+gary channel join|leave <name> --agent <a>    put an agent on / take it off
+gary channels                                 list channels and their members
+gary post <channel> --from <me> [message]     fan out to every member but you
 
 gary serve [--addr 127.0.0.1:4777]            run the hub
 gary token new                                generate the shared secret (agents/nodes)
@@ -204,8 +214,9 @@ gary send reviewer --from planner "review the diff on branch auth-refactor"
 gary inbox planner          # the review comes back here
 ```
 
-Each inbound message runs one `claude -p` turn in the agent's repo, and the
-result is sent back to whoever asked. Between messages **nothing is running** —
+Each inbound message runs one `claude -p` turn in the agent's repo. The result
+goes back to whoever asked **only if they used `--expect-reply`** — otherwise the
+turn ends there and the node prints it. Between messages **nothing is running** —
 context lives in the Claude session (`--session-id`, then `--resume`), not in an
 idle process. So an interrupted turn leaves the message `pending` and
 re-deliverable rather than lost.
@@ -220,6 +231,50 @@ gary builds itself — a spawn carries a repo, a prompt and a model, never a
 command. Spawned agents default to `--permission-mode acceptEdits`; the
 skip-permissions mode needs an explicit `--yolo`. They run as the node's user
 with that user's filesystem access.
+
+## Channels (standups, roles, one message to everyone)
+
+A channel is a named address that expands to a member list. Posting to it drops
+one message into each member's mailbox:
+
+```sh
+gary channel new standup --description "daily status"
+gary channel join standup --agent planner
+gary channel join standup --agent coder
+gary channel join standup --agent reviewer
+
+gary post standup --from planner "parser lands today; reviewer is blocked on the lexer"
+gary channels
+```
+
+Each member gets ordinary mail tagged with the channel, so `recv`, `watch`, FIFO
+order and the node's turn loop all work unchanged — and a spawned member runs one
+turn on it. The sender never receives their own post.
+
+**A post never asks for a reply.** That is deliberate: if posts were repliable, a
+five-member channel would turn one post into five turns that each produced five
+more messages. Instead a post costs each member exactly one turn and stops, and
+an agent that genuinely needs to say something back posts again as its own
+decision.
+
+## Why agents stop talking in circles
+
+Left alone, two spawned agents ping-pong forever: every message runs a turn, and
+if every turn's result is mailed back to the sender, each answer is a new message
+that triggers another turn. No wording rule fixes that — it's structural.
+
+So a turn's result is only sent back when the message asked for one:
+
+```sh
+gary send coder --from planner "the lexer is broken on tabs"          # no answer comes back
+gary send coder --from planner --expect-reply "what broke the lexer?" # the result is mailed back
+```
+
+Replies the node sends are themselves always no-reply, so an answer can never
+produce another answer. A conversation longer than one round trip has to be an
+agent deciding to send a new request — which is a choice, not a loop. Spawned
+agents are told with each message which kind it is, so they know whether their
+final response is going anywhere.
 
 ## How delivery actually works
 
@@ -302,9 +357,20 @@ The hub serves a live view at its own address — including under a sub-path, so
 `https://example.com/gary/` works as-is. `gary dashboard` runs the same page
 without the API, straight off a local file.
 
-It shows machines and their heartbeats, the long-running agents on each with
-their queue depth and a stop button, the registry, and messages landing (pending)
-and being consumed (acked) in real time.
+Three tabs:
+
+- **Rooms** — each channel as a live transcript, with a box to type into. What
+  you post goes out under your dashboard login (or `dashboard` on a token-only
+  hub), which is registered as an agent on first post. The fan-out is collapsed
+  back into one entry per post, so you read what was said, not N copies of it.
+  Rejections — including the etiquette guard refusing a pleasantry — are shown
+  next to the box rather than swallowed.
+- **Inbox** — every message, filterable by agent, showing its channel and
+  whether it wants a reply, landing (pending) and being consumed (acked) live.
+- **Agents** — machines and their heartbeats, the long-running agents on each
+  with queue depth and a stop button, and the registry.
+
+`gary dashboard` is read-only (no API), so its composer is disabled.
 
 ```sh
 gary dashboard --db mydb.db --addr localhost:4777
@@ -352,8 +418,11 @@ rule agents must follow:
 > send thanks, acknowledgements, "sounds good", or "will do". If nothing is
 > needed, send nothing.
 
-`send` enforces the floor: empty and acknowledgement-only messages are rejected.
-Spawned agents get this rule in their system prompt, and if one replies with
-nothing but a pleasantry the node drops it silently.
+`send` and `post` enforce the floor: empty and acknowledgement-only messages are
+rejected. Spawned agents get this rule in their system prompt, and if one replies
+with nothing but a pleasantry the node drops it silently.
+
+The structural half of the rule is reply gating above: a result nobody asked for
+is never mailed anywhere, so there is nothing to be polite about.
 
 See `CLAUDE.md` for the full spec, invariants, and data model.

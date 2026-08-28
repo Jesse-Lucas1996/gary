@@ -120,13 +120,51 @@ func (c *Client) List() ([]Agent, error) {
 	return out, c.getJSON("GET", "/v1/agents", nil, &out, reqTimeout)
 }
 
-func (c *Client) Send(from, to, body string) (int64, error) {
+func (c *Client) Send(from, to, body string, expectsReply bool) (int64, error) {
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	err := c.getJSON("POST", "/v1/send",
-		map[string]string{"from": from, "to": to, "body": body}, &out, reqTimeout)
+	in := struct {
+		From         string `json:"from"`
+		To           string `json:"to"`
+		Body         string `json:"body"`
+		ExpectsReply bool   `json:"expects_reply"`
+	}{from, to, body, expectsReply}
+	err := c.getJSON("POST", "/v1/send", in, &out, reqTimeout)
 	return out.ID, err
+}
+
+func (c *Client) CreateChannel(name, desc string) error {
+	return c.getJSON("POST", "/v1/channels/new",
+		map[string]string{"name": name, "description": desc}, nil, reqTimeout)
+}
+
+func (c *Client) DeleteChannel(name string) error {
+	return c.getJSON("POST", "/v1/channels/rm", map[string]string{"name": name}, nil, reqTimeout)
+}
+
+func (c *Client) JoinChannel(channel, agent string) error {
+	return c.getJSON("POST", "/v1/channels/join",
+		map[string]string{"channel": channel, "agent": agent}, nil, reqTimeout)
+}
+
+func (c *Client) LeaveChannel(channel, agent string) error {
+	return c.getJSON("POST", "/v1/channels/leave",
+		map[string]string{"channel": channel, "agent": agent}, nil, reqTimeout)
+}
+
+func (c *Client) Channels() ([]Channel, error) {
+	var out []Channel
+	return out, c.getJSON("GET", "/v1/channels", nil, &out, reqTimeout)
+}
+
+func (c *Client) Post(from, channel, body string) ([]int64, error) {
+	var out struct {
+		IDs []int64 `json:"ids"`
+	}
+	err := c.getJSON("POST", "/v1/post",
+		map[string]string{"from": from, "channel": channel, "body": body}, &out, reqTimeout)
+	return out.IDs, err
 }
 
 func (c *Client) Inbox(name string) ([]Message, error) {

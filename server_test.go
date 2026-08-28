@@ -27,7 +27,7 @@ func TestClientFIFOAndAutoAck(t *testing.T) {
 		}
 	}
 	for _, body := range []string{"first", "second", "third"} {
-		if _, err := c.Send("a", "b", body); err != nil {
+		if _, err := c.Send("a", "b", body, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,17 +57,102 @@ func TestClientErrorsKeepTheirIdentity(t *testing.T) {
 	if err := c.RegisterOn("a", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Send("a", "a", "thanks!"); !errors.Is(err, ErrGuard) {
+	if _, err := c.Send("a", "a", "thanks!", false); !errors.Is(err, ErrGuard) {
 		t.Fatalf("pleasantry over HTTP: got %v, want ErrGuard", err)
 	}
-	if _, err := c.Send("a", "a", ""); !errors.Is(err, ErrGuard) {
+	if _, err := c.Send("a", "a", "", false); !errors.Is(err, ErrGuard) {
 		t.Fatalf("empty body over HTTP: got %v, want ErrGuard", err)
 	}
-	if _, err := c.Send("a", "ghost", "real message"); !errors.Is(err, ErrUnregistered) {
+	if _, err := c.Send("a", "ghost", "real message", false); !errors.Is(err, ErrUnregistered) {
 		t.Fatalf("unregistered recipient over HTTP: got %v, want ErrUnregistered", err)
 	}
-	if _, err := c.Send("ghost", "a", "real message"); !errors.Is(err, ErrUnregistered) {
+	if _, err := c.Send("ghost", "a", "real message", false); !errors.Is(err, ErrUnregistered) {
 		t.Fatalf("unregistered sender over HTTP: got %v, want ErrUnregistered", err)
+	}
+}
+
+func TestClientCarriesExpectsReply(t *testing.T) {
+	c, _ := testHub(t)
+	for _, n := range []string{"a", "b"} {
+		if err := c.RegisterOn(n, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.Send("a", "b", "what broke the build?", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Send("a", "b", "the build is fixed", false); err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.Inbox("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in) != 2 || !in[0].ExpectsReply || in[1].ExpectsReply {
+		t.Fatalf("the reply flag did not survive the wire: %+v", in)
+	}
+	m, err := c.Recv("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.ExpectsReply {
+		t.Fatalf("recv over HTTP lost the reply flag: %+v", m)
+	}
+}
+
+func TestClientChannels(t *testing.T) {
+	c, _ := testHub(t)
+	for _, n := range []string{"planner", "coder", "reviewer"} {
+		if err := c.RegisterOn(n, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.CreateChannel("standup", "daily status"); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"planner", "coder", "reviewer"} {
+		if err := c.JoinChannel("standup", n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chans, err := c.Channels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chans) != 1 || len(chans[0].Members) != 3 {
+		t.Fatalf("channel membership did not survive the wire: %+v", chans)
+	}
+
+	ids, err := c.Post("planner", "standup", "the parser lands today")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("post over HTTP reached %d agents, want 2", len(ids))
+	}
+	m, err := c.Recv("coder")
+	if err != nil || m == nil {
+		t.Fatalf("recv: %v %v", m, err)
+	}
+	if m.Channel != "standup" || m.ExpectsReply {
+		t.Fatalf("post attribution or reply flag lost over the wire: %+v", m)
+	}
+
+	if _, err := c.Post("planner", "nope", "real content"); !errors.Is(err, ErrUnregistered) {
+		t.Fatalf("unknown channel must arrive as ErrUnregistered, got %v", err)
+	}
+	if _, err := c.Post("planner", "standup", "thanks!"); !errors.Is(err, ErrGuard) {
+		t.Fatalf("the guard must arrive as ErrGuard over the wire, got %v", err)
+	}
+
+	if err := c.LeaveChannel("standup", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteChannel("standup"); err != nil {
+		t.Fatal(err)
+	}
+	if chans, _ = c.Channels(); len(chans) != 0 {
+		t.Fatalf("channel survived deletion over HTTP: %+v", chans)
 	}
 }
 
@@ -116,7 +201,7 @@ func TestRecvWaitBlocksUntilMessageArrives(t *testing.T) {
 	}
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		s.Send("a", "b", "arrived late")
+		s.Send("a", "b", "arrived late", false)
 	}()
 	start := time.Now()
 	m, err := c.RecvWait(context.Background(), "b", 5*time.Second)

@@ -58,14 +58,23 @@ type Spawn struct {
 	UpdatedAt      int64  `json:"updated_at"`
 }
 
+type Channel struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	CreatedAt   int64    `json:"created_at"`
+	Members     []string `json:"members"`
+}
+
 type Message struct {
-	ID        int64  `json:"id"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Body      string `json:"body"`
-	Status    string `json:"status"`
-	CreatedAt int64  `json:"created_at"`
-	AckedAt   *int64 `json:"acked_at,omitempty"`
+	ID           int64  `json:"id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Body         string `json:"body"`
+	Channel      string `json:"channel,omitempty"`
+	ExpectsReply bool   `json:"expects_reply,omitempty"`
+	Status       string `json:"status"`
+	CreatedAt    int64  `json:"created_at"`
+	AckedAt      *int64 `json:"acked_at,omitempty"`
 }
 
 var (
@@ -82,15 +91,28 @@ CREATE TABLE IF NOT EXISTS agents (
     last_seen   INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_agent TEXT NOT NULL,
-    to_agent   TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
-    body       TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',
-    created_at INTEGER NOT NULL,
-    acked_at   INTEGER
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent    TEXT NOT NULL,
+    to_agent      TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    body          TEXT NOT NULL,
+    channel       TEXT NOT NULL DEFAULT '',
+    expects_reply INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    acked_at      INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_inbox ON messages(to_agent, status, id);
+CREATE TABLE IF NOT EXISTS channels (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_members (
+    channel   TEXT NOT NULL REFERENCES channels(name) ON DELETE CASCADE,
+    agent     TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    joined_at INTEGER NOT NULL,
+    PRIMARY KEY (channel, agent)
+);
 CREATE TABLE IF NOT EXISTS nodes (
     name       TEXT PRIMARY KEY,
     version    TEXT NOT NULL DEFAULT '',
@@ -160,17 +182,26 @@ func migrate(db *sql.DB) error {
 	if err := ensureColumn(db, "agents", "node", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Before dropSenderFK, so its rebuild can copy the columns across.
+	if err := ensureColumn(db, "messages", "channel", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "messages", "expects_reply", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return dropSenderFK(db)
 }
 
 const messagesTable = `(
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_agent TEXT NOT NULL,
-    to_agent   TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
-    body       TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'pending',
-    created_at INTEGER NOT NULL,
-    acked_at   INTEGER
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent    TEXT NOT NULL,
+    to_agent      TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
+    body          TEXT NOT NULL,
+    channel       TEXT NOT NULL DEFAULT '',
+    expects_reply INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    acked_at      INTEGER
 )`
 
 func dropSenderFK(db *sql.DB) error {
@@ -196,8 +227,8 @@ func dropSenderFK(db *sql.DB) error {
 	defer tx.Rollback()
 	for _, stmt := range []string{
 		`CREATE TABLE messages_new ` + messagesTable,
-		`INSERT INTO messages_new(id, from_agent, to_agent, body, status, created_at, acked_at)
-		 SELECT id, from_agent, to_agent, body, status, created_at, acked_at FROM messages`,
+		`INSERT INTO messages_new(id, from_agent, to_agent, body, channel, expects_reply, status, created_at, acked_at)
+		 SELECT id, from_agent, to_agent, body, channel, expects_reply, status, created_at, acked_at FROM messages`,
 		`DROP TABLE messages`,
 		`ALTER TABLE messages_new RENAME TO messages`,
 		`CREATE INDEX IF NOT EXISTS idx_inbox ON messages(to_agent, status, id)`,
@@ -309,8 +340,19 @@ func (s *Store) exists(name string) (bool, error) {
 	return n > 0, err
 }
 
+const msgCols = `id, from_agent, to_agent, body, channel, expects_reply, status, created_at, acked_at`
+
+type scanner interface{ Scan(...any) error }
+
+func scanMessage(sc scanner, m *Message) error {
+	return sc.Scan(&m.ID, &m.From, &m.To, &m.Body, &m.Channel, &m.ExpectsReply,
+		&m.Status, &m.CreatedAt, &m.AckedAt)
+}
+
 // Send enqueues a message after validating both agents and the etiquette guard.
-func (s *Store) Send(from, to, body string) (int64, error) {
+// expectsReply asks for the recipient's turn result back; without it the turn
+// ends at the recipient and produces no further message (invariant 10).
+func (s *Store) Send(from, to, body string, expectsReply bool) (int64, error) {
 	if err := checkGuard(body); err != nil {
 		return 0, err
 	}
@@ -324,8 +366,9 @@ func (s *Store) Send(from, to, body string) (int64, error) {
 	} else if !ok {
 		return 0, fmt.Errorf("%w: recipient %q", ErrUnregistered, to)
 	}
-	res, err := s.db.Exec(`INSERT INTO messages(from_agent, to_agent, body, created_at) VALUES(?,?,?,?)`,
-		from, to, body, time.Now().Unix())
+	res, err := s.db.Exec(
+		`INSERT INTO messages(from_agent, to_agent, body, expects_reply, created_at) VALUES(?,?,?,?,?)`,
+		from, to, body, expectsReply, time.Now().Unix())
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
@@ -335,7 +378,7 @@ func (s *Store) Send(from, to, body string) (int64, error) {
 // Inbox returns pending messages for name, FIFO, without consuming them.
 func (s *Store) Inbox(name string) ([]Message, error) {
 	rows, err := s.db.Query(`
-		SELECT id, from_agent, to_agent, body, status, created_at, acked_at
+		SELECT `+msgCols+`
 		FROM messages WHERE to_agent=? AND status='pending' ORDER BY id`, name)
 	if err != nil {
 		return nil, fmt.Errorf("inbox: %w", err)
@@ -344,7 +387,7 @@ func (s *Store) Inbox(name string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.From, &m.To, &m.Body, &m.Status, &m.CreatedAt, &m.AckedAt); err != nil {
+		if err := scanMessage(rows, &m); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -356,7 +399,7 @@ func (s *Store) Inbox(name string) ([]Message, error) {
 // for the dashboard's live view. Read-only — does not touch message status.
 func (s *Store) Recent(limit int) ([]Message, error) {
 	rows, err := s.db.Query(`
-		SELECT id, from_agent, to_agent, body, status, created_at, acked_at
+		SELECT `+msgCols+`
 		FROM messages ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("recent: %w", err)
@@ -365,7 +408,7 @@ func (s *Store) Recent(limit int) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.From, &m.To, &m.Body, &m.Status, &m.CreatedAt, &m.AckedAt); err != nil {
+		if err := scanMessage(rows, &m); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -383,10 +426,10 @@ func (s *Store) Recv(name string) (*Message, error) {
 	defer tx.Rollback()
 
 	var m Message
-	err = tx.QueryRow(`
-		SELECT id, from_agent, to_agent, body, created_at
-		FROM messages WHERE to_agent=? AND status='pending' ORDER BY id LIMIT 1`, name).
-		Scan(&m.ID, &m.From, &m.To, &m.Body, &m.CreatedAt)
+	row := tx.QueryRow(`
+		SELECT `+msgCols+`
+		FROM messages WHERE to_agent=? AND status='pending' ORDER BY id LIMIT 1`, name)
+	err = scanMessage(row, &m)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -432,6 +475,178 @@ func pollUntil[T any](ctx context.Context, d time.Duration, fn func() (*T, error
 }
 
 const pollTick = 200 * time.Millisecond
+
+// CreateChannel upserts a channel. Idempotent, like Register.
+func (s *Store) CreateChannel(name, desc string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("channel name required")
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO channels(name, description, created_at) VALUES(?,?,?)
+		ON CONFLICT(name) DO UPDATE SET description=excluded.description`,
+		name, desc, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("create channel %q: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteChannel removes a channel; ON DELETE CASCADE drops its membership rows.
+// Messages already fanned out are untouched — they are ordinary mail by then.
+func (s *Store) DeleteChannel(name string) error {
+	res, err := s.db.Exec(`DELETE FROM channels WHERE name=?`, name)
+	if err != nil {
+		return fmt.Errorf("delete channel %q: %w", name, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: channel %q", ErrUnregistered, name)
+	}
+	return nil
+}
+
+// JoinChannel adds a registered agent to an existing channel. Idempotent.
+func (s *Store) JoinChannel(channel, agent string) error {
+	if ok, err := s.channelExists(channel); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("%w: channel %q", ErrUnregistered, channel)
+	}
+	if ok, err := s.exists(agent); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("%w: agent %q", ErrUnregistered, agent)
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO channel_members(channel, agent, joined_at) VALUES(?,?,?)
+		ON CONFLICT(channel, agent) DO NOTHING`, channel, agent, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("join %q: %w", channel, err)
+	}
+	return nil
+}
+
+func (s *Store) LeaveChannel(channel, agent string) error {
+	res, err := s.db.Exec(`DELETE FROM channel_members WHERE channel=? AND agent=?`, channel, agent)
+	if err != nil {
+		return fmt.Errorf("leave %q: %w", channel, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("agent %q is not on channel %q", agent, channel)
+	}
+	return nil
+}
+
+func (s *Store) channelExists(name string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM channels WHERE name=?`, name).Scan(&n)
+	return n > 0, err
+}
+
+// Channels lists every channel with its members, both in name order.
+func (s *Store) Channels() ([]Channel, error) {
+	rows, err := s.db.Query(`SELECT name, description, created_at FROM channels ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("channels: %w", err)
+	}
+	defer rows.Close()
+	byName := map[string]int{}
+	var out []Channel
+	for rows.Next() {
+		var c Channel
+		if err := rows.Scan(&c.Name, &c.Description, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		byName[c.Name] = len(out)
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	mrows, err := s.db.Query(`SELECT channel, agent FROM channel_members ORDER BY channel, agent`)
+	if err != nil {
+		return nil, fmt.Errorf("channel members: %w", err)
+	}
+	defer mrows.Close()
+	for mrows.Next() {
+		var ch, agent string
+		if err := mrows.Scan(&ch, &agent); err != nil {
+			return nil, err
+		}
+		if i, ok := byName[ch]; ok {
+			out[i].Members = append(out[i].Members, agent)
+		}
+	}
+	return out, mrows.Err()
+}
+
+// Post fans a body out to every member of channel except the sender, one message
+// each, in a single transaction. A post never expects a reply — that is what
+// keeps a channel from turning one message into a members-squared storm of them
+// (invariant 10). Returns the ids delivered, oldest first.
+func (s *Store) Post(from, channel, body string) ([]int64, error) {
+	if err := checkGuard(body); err != nil {
+		return nil, err
+	}
+	if ok, err := s.exists(from); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, fmt.Errorf("%w: sender %q", ErrUnregistered, from)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM channels WHERE name=?`, channel).Scan(&n); err != nil {
+		return nil, fmt.Errorf("post: %w", err)
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("%w: channel %q", ErrUnregistered, channel)
+	}
+
+	rows, err := tx.Query(`SELECT agent FROM channel_members WHERE channel=? AND agent!=? ORDER BY agent`,
+		channel, from)
+	if err != nil {
+		return nil, fmt.Errorf("post: %w", err)
+	}
+	var members []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		members = append(members, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().Unix()
+	ids := make([]int64, 0, len(members))
+	for _, to := range members {
+		res, err := tx.Exec(`
+			INSERT INTO messages(from_agent, to_agent, body, channel, expects_reply, created_at)
+			VALUES(?,?,?,?,0,?)`, from, to, body, channel, now)
+		if err != nil {
+			return nil, fmt.Errorf("post to %q: %w", to, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
 
 func (s *Store) Heartbeat(name, version string) error {
 	if strings.TrimSpace(name) == "" {

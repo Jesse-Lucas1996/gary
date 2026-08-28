@@ -141,13 +141,16 @@ func TestNodeRunsSpawnEndToEnd(t *testing.T) {
 		return false
 	})
 
-	if _, err := s.Send("planner", "coder", "create hello.txt"); err != nil {
+	if _, err := s.Send("planner", "coder", "create hello.txt", true); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "reply delivered to sender", func() bool {
 		msgs, _ := s.Inbox("planner")
 		return len(msgs) == 1 && msgs[0].Body == "created hello.txt"
 	})
+	if msgs, _ := s.Inbox("planner"); msgs[0].ExpectsReply {
+		t.Fatal("a reply must not itself expect a reply, or two agents volley forever")
+	}
 
 	if err := s.StopSpawn("coder"); err != nil {
 		t.Fatal(err)
@@ -156,6 +159,79 @@ func TestNodeRunsSpawnEndToEnd(t *testing.T) {
 		st, _ := s.SpawnStatus(1)
 		return st == "stopped"
 	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("runNode did not exit after cancellation")
+	}
+}
+
+func TestInboundStatesWhetherAReplyIsExpected(t *testing.T) {
+	awaited := inbound(&Message{From: "planner", Body: "make a file", ExpectsReply: true})
+	if !strings.Contains(awaited, "waiting on your answer") {
+		t.Errorf("an awaited message must say so:\n%s", awaited)
+	}
+	forget := inbound(&Message{From: "planner", Body: "make a file"})
+	if !strings.Contains(forget, "No reply is expected") {
+		t.Errorf("a fire-and-forget message must say so:\n%s", forget)
+	}
+	post := inbound(&Message{From: "planner", Body: "make a file", Channel: "standup"})
+	if !strings.Contains(post, "standup") || !strings.Contains(post, "No reply is expected") {
+		t.Errorf("a channel post must name its channel and expect no reply:\n%s", post)
+	}
+
+	for _, framed := range []string{awaited, forget, post} {
+		if !strings.Contains(framed, "make a file") || !strings.Contains(framed, "planner") {
+			t.Errorf("framing dropped the message or its sender:\n%s", framed)
+		}
+	}
+}
+
+// The loop breaker: a turn nobody asked for an answer from must not emit a
+// message, or two agents keep triggering each other's turns forever.
+func TestNodeDropsResultWhenNoReplyExpected(t *testing.T) {
+	s := testStore(t)
+	bin, record := stubClaude(t, "created hello.txt")
+	repo := t.TempDir()
+	mustReg(t, s, "planner")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runNode(ctx, s, "n1", bin, time.Minute) }()
+
+	eventually(t, "node heartbeat", func() bool {
+		n, _ := s.Nodes()
+		return len(n) == 1
+	})
+	if _, err := s.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: repo}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "agent registered by node", func() bool {
+		agents, _ := s.List()
+		for _, a := range agents {
+			if a.Name == "coder" && a.Node == "n1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	if _, err := s.Send("planner", "coder", "create hello.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the turn to run", func() bool {
+		b, _ := os.ReadFile(record)
+		return strings.Contains(string(b), "create hello.txt")
+	})
+	// The turn ran and returned a non-empty result; the reply, had there been
+	// one, would already be enqueued by the time the next turn could start.
+	time.Sleep(time.Second)
+	if msgs, _ := s.Inbox("planner"); len(msgs) != 0 {
+		t.Fatalf("an unrequested result must not become a message: %+v", msgs)
+	}
 
 	cancel()
 	select {

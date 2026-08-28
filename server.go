@@ -50,7 +50,7 @@ func hubHandler(s *Store, o serveOpts) http.Handler {
 	if o.api {
 		registerAPI(mux, s)
 	}
-	registerDashboard(mux, s, o.dbPath, o.api, !o.users.empty())
+	registerDashboard(mux, s, o)
 	registerLogin(mux, o)
 	return authMiddleware(o, mux)
 }
@@ -249,11 +249,14 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 	})
 
 	handle(mux, "/v1/send", func(r *http.Request) (any, error) {
-		var in struct{ From, To, Body string }
+		var in struct {
+			From, To, Body string
+			ExpectsReply   bool `json:"expects_reply"`
+		}
 		if err := decode(r, &in); err != nil {
 			return nil, err
 		}
-		id, err := s.Send(in.From, in.To, in.Body)
+		id, err := s.Send(in.From, in.To, in.Body, in.ExpectsReply)
 		if err != nil {
 			return nil, err
 		}
@@ -274,6 +277,52 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 	})
 	handle(mux, "/v1/recent", func(r *http.Request) (any, error) {
 		return nonNil(s.Recent(intParam(r, "limit", 200)))
+	})
+
+	handle(mux, "/v1/channels", func(r *http.Request) (any, error) {
+		return nonNil(s.Channels())
+	})
+	handle(mux, "/v1/channels/new", func(r *http.Request) (any, error) {
+		var in struct{ Name, Description string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.CreateChannel(in.Name, in.Description)
+	})
+	handle(mux, "/v1/channels/rm", func(r *http.Request) (any, error) {
+		var in struct{ Name string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.DeleteChannel(in.Name)
+	})
+	handle(mux, "/v1/channels/join", func(r *http.Request) (any, error) {
+		var in struct{ Channel, Agent string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.JoinChannel(in.Channel, in.Agent)
+	})
+	handle(mux, "/v1/channels/leave", func(r *http.Request) (any, error) {
+		var in struct{ Channel, Agent string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.LeaveChannel(in.Channel, in.Agent)
+	})
+	handle(mux, "/v1/post", func(r *http.Request) (any, error) {
+		var in struct{ From, Channel, Body string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		ids, err := s.Post(in.From, in.Channel, in.Body)
+		if err != nil {
+			return nil, err
+		}
+		if ids == nil {
+			ids = []int64{}
+		}
+		return map[string][]int64{"ids": ids}, nil
 	})
 
 	handle(mux, "/v1/nodes", func(r *http.Request) (any, error) {
@@ -339,7 +388,21 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 	})
 }
 
-func registerDashboard(mux *http.ServeMux, s *Store, dbPath string, api, login bool) {
+// sessionUser is the signed-in dashboard account, or "" for a token-only client.
+func sessionUser(o serveOpts, r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return ""
+	}
+	name, ok := validSession(o.users.sessionKey(o.token), c.Value)
+	if !ok {
+		return ""
+	}
+	return name
+}
+
+func registerDashboard(mux *http.ServeMux, s *Store, o serveOpts) {
+	dbPath, api, login := o.dbPath, o.api, !o.users.empty()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -369,10 +432,22 @@ func registerDashboard(mux *http.ServeMux, s *Store, dbPath string, api, login b
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		channels, err := s.Channels()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		// Who the browser posts as. A signed-in account posts under its own name;
+		// a token-only viewer falls back to a shared "dashboard" identity.
+		me := sessionUser(o, r)
+		if me == "" {
+			me = "dashboard"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"agents": nilAsEmpty(agents), "messages": nilAsEmpty(msgs),
 			"nodes": nilAsEmpty(nodes), "spawns": nilAsEmpty(spawns),
+			"channels": nilAsEmpty(channels), "me": me,
 			"db_path": dbPath, "api": api, "login": login, "stale_after": int64(3 * heartbeatEvery / time.Second),
 		})
 	})
