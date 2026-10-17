@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func TestTurnBuildsClaudeInvocation(t *testing.T) {
 	r := &runner{b: s, node: "n1", claudeBin: bin, running: map[string]bool{}}
 	sp := &Spawn{ID: 1, Agent: "coder", Node: "n1", Repo: repo, PermissionMode: "acceptEdits", Model: "sonnet"}
 
-	out, session, err := r.turn(context.Background(), sp, "", &Message{From: "planner", Body: "make a file"})
+	out, session, err := r.turn(context.Background(), sp, "", &Message{From: "planner", Body: "make a file"}, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestTurnBuildsClaudeInvocation(t *testing.T) {
 	for _, want := range []string{
 		"CWD=" + repo,
 		"ARG=-p",
-		"ARG=--output-format", "ARG=json",
+		"ARG=--output-format", "ARG=stream-json", "ARG=--verbose",
 		"ARG=--permission-mode", "ARG=acceptEdits",
 		"ARG=--session-id",
 		"ARG=--model", "ARG=sonnet",
@@ -77,7 +78,7 @@ func TestTurnResumesExistingSession(t *testing.T) {
 	r := &runner{b: s, node: "n1", claudeBin: bin, running: map[string]bool{}}
 	sp := &Spawn{ID: 1, Agent: "coder", Node: "n1", Repo: t.TempDir(), PermissionMode: "acceptEdits"}
 
-	if _, _, err := r.turn(context.Background(), sp, "sess-existing", &Message{From: "p", Body: "hi"}); err != nil {
+	if _, _, err := r.turn(context.Background(), sp, "sess-existing", &Message{From: "p", Body: "hi"}, func(string) {}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(record)
@@ -150,6 +151,14 @@ func TestNodeRunsSpawnEndToEnd(t *testing.T) {
 	})
 	if msgs, _ := s.Inbox("planner"); msgs[0].ExpectsReply {
 		t.Fatal("a reply must not itself expect a reply, or two agents volley forever")
+	}
+	eventually(t, "finished turn recorded as activity", func() bool {
+		sp, _ := s.Spawns(1)
+		return len(sp) == 1 && sp[0].LastTurnAt != 0
+	})
+	sp, _ := s.Spawns(1)
+	if a := sp[0].Activity; a.TurnMsg != 0 || a.Step != "" || a.LastResult != "created hello.txt" || a.LastFailed {
+		t.Fatalf("after a turn the agent should read idle with the result kept, got %+v", a)
 	}
 
 	if err := s.StopSpawn("coder"); err != nil {
@@ -338,4 +347,185 @@ func eventually(t *testing.T, what string, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestReadStreamReportsToolCallsAsSteps(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"let me look"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"while pgrep -f x;\n do sleep 5; done","description":"wait"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}`,
+		`not json at all`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a"}},{"type":"tool_use","name":"Grep","input":{"pattern":"b"}}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s1"}`,
+	}, "\n")
+	var steps []string
+	res, found := readStream(strings.NewReader(stream), func(s string) { steps = append(steps, s) })
+	if !found || res.Result != "done" || res.SessionID != "s1" {
+		t.Fatalf("result: found=%v %+v", found, res)
+	}
+	want := []string{"writing", "Bash: while pgrep -f x; do sleep 5; done", "thinking", "Read: /a (+1 more in parallel)"}
+	if strings.Join(steps, "|") != strings.Join(want, "|") {
+		t.Fatalf("steps:\n got %q\nwant %q", steps, want)
+	}
+}
+
+func TestReadStreamWithoutResult(t *testing.T) {
+	if _, found := readStream(strings.NewReader(`{"type":"system"}`), func(string) {}); found {
+		t.Fatal("a stream with no result event must not count as a result")
+	}
+}
+
+func TestSetActivityKeepsLastTurnWhenGoingIdle(t *testing.T) {
+	s := testStore(t)
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: "/tmp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := []Activity{
+		{TurnMsg: 7, TurnFrom: "planner", TurnStarted: 100, Step: "Bash: ls", StepAt: 101},
+		{LastTurnAt: 130, LastTurnSecs: 30, LastResult: "boom", LastFailed: true},
+		{},
+	}
+	for _, a := range steps {
+		if err := s.SetActivity(id, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp, _ := s.Spawns(1)
+	got := sp[0].Activity
+	want := Activity{LastTurnAt: 130, LastTurnSecs: 30, LastResult: "boom", LastFailed: true}
+	if got != want {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestReclaimedSpawnKeepsItsSession(t *testing.T) {
+	s := testStore(t)
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: "/tmp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSpawn(id, "queued", "sess-kept", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := s.ClaimSpawn("n1")
+	if err != nil || sp == nil {
+		t.Fatalf("claim: %v %v", sp, err)
+	}
+	if sp.SessionID != "sess-kept" {
+		t.Fatalf("claimed spawn lost its session: %q", sp.SessionID)
+	}
+}
+
+func TestClearChannelWipesPostsAndResetsMembers(t *testing.T) {
+	s := testStore(t)
+	for _, n := range []string{"lead", "coder", "other"} {
+		mustReg(t, s, n)
+	}
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	coder, _ := s.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: "/tmp"})
+	other, _ := s.Spawn(SpawnSpec{Agent: "other", Node: "n1", Repo: "/tmp"})
+	for _, id := range []int64{coder, other} {
+		if err := s.UpdateSpawn(id, "running", "sess-old", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateChannel("room", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"lead", "coder"} {
+		if err := s.JoinChannel("room", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Post("lead", "room", "build the parser"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send("lead", "other", "a direct message", false); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.ClearChannel("room")
+	if err != nil || n != 1 {
+		t.Fatalf("clear: deleted %d, err %v", n, err)
+	}
+	if msgs, _ := s.Inbox("coder"); len(msgs) != 0 {
+		t.Fatalf("unread post survived the clear: %+v", msgs)
+	}
+	if msgs, _ := s.Inbox("other"); len(msgs) != 1 {
+		t.Fatal("clearing a channel must not touch direct messages")
+	}
+	if _, err := s.ClearChannel("nope"); !errors.Is(err, ErrUnregistered) {
+		t.Fatalf("clearing an unknown channel: %v", err)
+	}
+
+	for id, want := range map[int64]bool{coder: true, other: false} {
+		got, err := s.TakeReset(id)
+		if err != nil || got != want {
+			t.Fatalf("spawn %d reset: got %v (%v), want %v", id, got, err, want)
+		}
+	}
+	if again, _ := s.TakeReset(coder); again {
+		t.Fatal("a reset must be consumed once")
+	}
+	sp, _ := s.Spawns(10)
+	for _, x := range sp {
+		if x.ID == coder && x.SessionID != "" {
+			t.Fatalf("taking the reset must drop the session, still %q", x.SessionID)
+		}
+	}
+}
+
+func TestResetSessionNeedsALiveAgent(t *testing.T) {
+	s := testStore(t)
+	if err := s.ResetSession("ghost"); err == nil {
+		t.Fatal("resetting an agent with no running spawn should fail")
+	}
+}
+
+func TestNodeStartsFreshSessionAfterReset(t *testing.T) {
+	s := testStore(t)
+	bin, record := stubClaude(t, "done")
+	mustReg(t, s, "planner")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runNode(ctx, s, "n1", bin, time.Minute)
+	eventually(t, "node heartbeat", func() bool { n, _ := s.Nodes(); return len(n) == 1 })
+	if _, err := s.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "agent registered", func() bool { a, _ := s.List(); return len(a) == 2 })
+
+	turns := func() int { b, _ := os.ReadFile(record); return strings.Count(string(b), "CWD=") }
+	send := func(body string, want int) {
+		t.Helper()
+		if _, err := s.Send("planner", "coder", body, false); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "turn "+body, func() bool { return turns() == want })
+	}
+	send("one", 1)
+	send("two", 2)
+	if err := s.ResetSession("coder"); err != nil {
+		t.Fatal(err)
+	}
+	send("three", 3)
+
+	b, _ := os.ReadFile(record)
+	calls := strings.Split(string(b), "CWD=")[1:]
+	for i, want := range []string{"ARG=--session-id", "ARG=--resume", "ARG=--session-id"} {
+		if !strings.Contains(calls[i], want) {
+			t.Errorf("turn %d should use %s:\n%s", i+1, want, calls[i])
+		}
+	}
 }

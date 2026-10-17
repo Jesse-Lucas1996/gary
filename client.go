@@ -143,6 +143,13 @@ func (c *Client) DeleteChannel(name string) error {
 	return c.getJSON("POST", "/v1/channels/rm", map[string]string{"name": name}, nil, reqTimeout)
 }
 
+func (c *Client) ClearChannel(name string) (int64, error) {
+	var out struct {
+		Deleted int64 `json:"deleted"`
+	}
+	return out.Deleted, c.getJSON("POST", "/v1/channels/clear", map[string]string{"name": name}, &out, reqTimeout)
+}
+
 func (c *Client) JoinChannel(channel, agent string) error {
 	return c.getJSON("POST", "/v1/channels/join",
 		map[string]string{"channel": channel, "agent": agent}, nil, reqTimeout)
@@ -227,6 +234,21 @@ func (c *Client) SpawnStatus(id int64) (string, error) {
 		Status string `json:"status"`
 	}
 	return out.Status, c.getJSON("GET", "/v1/spawns/get?id="+strconv.FormatInt(id, 10), nil, &out, reqTimeout)
+}
+
+func (c *Client) SetActivity(id int64, a Activity) error {
+	return c.getJSON("POST", "/v1/spawns/activity", map[string]any{"id": id, "activity": a}, nil, reqTimeout)
+}
+
+func (c *Client) ResetSession(agent string) error {
+	return c.getJSON("POST", "/v1/spawns/reset", map[string]string{"agent": agent}, nil, reqTimeout)
+}
+
+func (c *Client) TakeReset(id int64) (bool, error) {
+	var out struct {
+		Reset bool `json:"reset"`
+	}
+	return out.Reset, c.getJSON("POST", "/v1/spawns/take-reset", map[string]int64{"id": id}, &out, reqTimeout)
 }
 
 func (c *Client) StopSpawn(agent string) error {

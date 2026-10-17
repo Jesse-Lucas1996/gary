@@ -56,6 +56,24 @@ type Spawn struct {
 	Error          string `json:"error,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
 	UpdatedAt      int64  `json:"updated_at"`
+	ResetPending   bool   `json:"reset_pending,omitempty"` // next turn starts a fresh claude session
+	Activity
+}
+
+// Activity is what a spawned agent is doing right now, as reported by its node:
+// the turn in progress and the step inside it (the tool call claude is running),
+// plus how the last finished turn went. TurnMsg is 0 between turns. It exists so
+// "running" stops meaning both "working" and "stuck on one command for an hour".
+type Activity struct {
+	TurnMsg      int64  `json:"turn_msg,omitempty"`
+	TurnFrom     string `json:"turn_from,omitempty"`
+	TurnStarted  int64  `json:"turn_started,omitempty"`
+	Step         string `json:"step,omitempty"`
+	StepAt       int64  `json:"step_at,omitempty"`
+	LastTurnAt   int64  `json:"last_turn_at,omitempty"`
+	LastTurnSecs int64  `json:"last_turn_secs,omitempty"`
+	LastResult   string `json:"last_result,omitempty"`
+	LastFailed   bool   `json:"last_failed,omitempty"`
 }
 
 type Channel struct {
@@ -132,7 +150,17 @@ CREATE TABLE IF NOT EXISTS spawns (
     pid             INTEGER,
     error           TEXT,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    turn_msg        INTEGER NOT NULL DEFAULT 0,
+    turn_from       TEXT NOT NULL DEFAULT '',
+    turn_started    INTEGER NOT NULL DEFAULT 0,
+    step            TEXT NOT NULL DEFAULT '',
+    step_at         INTEGER NOT NULL DEFAULT 0,
+    last_turn_at    INTEGER NOT NULL DEFAULT 0,
+    last_turn_secs  INTEGER NOT NULL DEFAULT 0,
+    last_result     TEXT NOT NULL DEFAULT '',
+    last_failed     INTEGER NOT NULL DEFAULT 0,
+    reset_pending   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_claim ON spawns(node, status, id);`
 
@@ -189,7 +217,25 @@ func migrate(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "expects_reply", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	for _, c := range activityColumns {
+		if err := ensureColumn(db, "spawns", c[0], c[1]); err != nil {
+			return err
+		}
+	}
 	return dropSenderFK(db)
+}
+
+var activityColumns = [][2]string{
+	{"turn_msg", "INTEGER NOT NULL DEFAULT 0"},
+	{"turn_from", "TEXT NOT NULL DEFAULT ''"},
+	{"turn_started", "INTEGER NOT NULL DEFAULT 0"},
+	{"step", "TEXT NOT NULL DEFAULT ''"},
+	{"step_at", "INTEGER NOT NULL DEFAULT 0"},
+	{"last_turn_at", "INTEGER NOT NULL DEFAULT 0"},
+	{"last_turn_secs", "INTEGER NOT NULL DEFAULT 0"},
+	{"last_result", "TEXT NOT NULL DEFAULT ''"},
+	{"last_failed", "INTEGER NOT NULL DEFAULT 0"},
+	{"reset_pending", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 const messagesTable = `(
@@ -504,6 +550,36 @@ func (s *Store) DeleteChannel(name string) error {
 	return nil
 }
 
+// ClearChannel wipes a channel back to a fresh start: it deletes every message
+// posted to it, unread ones included, and resets the context of each member that
+// is a running agent. This is the one deliberate exception to "a channel owns its
+// membership, not its mail": clearing is the operator asking for exactly that.
+func (s *Store) ClearChannel(name string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM channels WHERE name=?`, name).Scan(&n); err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("%w: channel %q", ErrUnregistered, name)
+	}
+	res, err := tx.Exec(`DELETE FROM messages WHERE channel=?`, name)
+	if err != nil {
+		return 0, fmt.Errorf("clear %q: %w", name, err)
+	}
+	deleted, _ := res.RowsAffected()
+	if _, err := tx.Exec(`UPDATE spawns SET reset_pending=1
+		WHERE status IN ('queued','claimed','running')
+		  AND agent IN (SELECT agent FROM channel_members WHERE channel=?)`, name); err != nil {
+		return 0, fmt.Errorf("clear %q: %w", name, err)
+	}
+	return deleted, tx.Commit()
+}
+
 // JoinChannel adds a registered agent to an existing channel. Idempotent.
 func (s *Store) JoinChannel(channel, agent string) error {
 	if ok, err := s.channelExists(channel); err != nil {
@@ -726,9 +802,9 @@ func (s *Store) ClaimSpawn(node string) (*Spawn, error) {
 
 	var sp Spawn
 	err = tx.QueryRow(`
-		SELECT id, agent, node, repo, prompt, model, permission_mode, created_at
+		SELECT id, agent, node, repo, prompt, model, permission_mode, COALESCE(session_id,''), created_at
 		FROM spawns WHERE node=? AND status='queued' ORDER BY id LIMIT 1`, node).
-		Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model, &sp.PermissionMode, &sp.CreatedAt)
+		Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model, &sp.PermissionMode, &sp.SessionID, &sp.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -767,6 +843,54 @@ func (s *Store) UpdateSpawn(id int64, status, sessionID string, pid int, errMsg 
 	return nil
 }
 
+// SetActivity replaces the live turn fields wholesale, so a zero Activity marks
+// the agent idle. The last-turn fields are written only when LastTurnAt is set,
+// so going idle never erases how the previous turn ended.
+func (s *Store) SetActivity(id int64, a Activity) error {
+	_, err := s.db.Exec(`
+		UPDATE spawns SET
+			turn_msg=?, turn_from=?, turn_started=?, step=?, step_at=?,
+			last_turn_at   = CASE WHEN ?!=0 THEN ? ELSE last_turn_at END,
+			last_turn_secs = CASE WHEN ?!=0 THEN ? ELSE last_turn_secs END,
+			last_result    = CASE WHEN ?!=0 THEN ? ELSE last_result END,
+			last_failed    = CASE WHEN ?!=0 THEN ? ELSE last_failed END
+		WHERE id=?`,
+		a.TurnMsg, a.TurnFrom, a.TurnStarted, a.Step, a.StepAt,
+		a.LastTurnAt, a.LastTurnAt, a.LastTurnAt, a.LastTurnSecs,
+		a.LastTurnAt, a.LastResult, a.LastTurnAt, a.LastFailed, id)
+	if err != nil {
+		return fmt.Errorf("spawn %d activity: %w", id, err)
+	}
+	return nil
+}
+
+// ResetSession asks an agent to start its next turn in a fresh claude session.
+// It is a flag rather than clearing session_id directly, because a turn already
+// running would write its session back when it finishes and undo the reset.
+func (s *Store) ResetSession(agent string) error {
+	res, err := s.db.Exec(`UPDATE spawns SET reset_pending=1
+		WHERE agent=? AND status IN ('queued','claimed','running')`, agent)
+	if err != nil {
+		return fmt.Errorf("reset %q: %w", agent, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("no running spawn for agent %q", agent)
+	}
+	return nil
+}
+
+// TakeReset consumes a pending reset: it reports whether one was asked for and,
+// in the same statement, clears the flag and the stored session.
+func (s *Store) TakeReset(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE spawns SET reset_pending=0, session_id=NULL
+		WHERE id=? AND reset_pending=1`, id)
+	if err != nil {
+		return false, fmt.Errorf("spawn %d reset: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 func (s *Store) SpawnStatus(id int64) (string, error) {
 	var st string
 	err := s.db.QueryRow(`SELECT status FROM spawns WHERE id=?`, id).Scan(&st)
@@ -792,7 +916,9 @@ func (s *Store) StopSpawn(agent string) error {
 func (s *Store) Spawns(limit int) ([]Spawn, error) {
 	rows, err := s.db.Query(`
 		SELECT id, agent, node, repo, prompt, model, permission_mode, status,
-		       COALESCE(session_id,''), COALESCE(pid,0), COALESCE(error,''), created_at, updated_at
+		       COALESCE(session_id,''), COALESCE(pid,0), COALESCE(error,''), created_at, updated_at,
+		       turn_msg, turn_from, turn_started, step, step_at,
+		       last_turn_at, last_turn_secs, last_result, last_failed, reset_pending
 		FROM spawns ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("spawns: %w", err)
@@ -802,7 +928,9 @@ func (s *Store) Spawns(limit int) ([]Spawn, error) {
 	for rows.Next() {
 		var sp Spawn
 		if err := rows.Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model,
-			&sp.PermissionMode, &sp.Status, &sp.SessionID, &sp.PID, &sp.Error, &sp.CreatedAt, &sp.UpdatedAt); err != nil {
+			&sp.PermissionMode, &sp.Status, &sp.SessionID, &sp.PID, &sp.Error, &sp.CreatedAt, &sp.UpdatedAt,
+			&sp.TurnMsg, &sp.TurnFrom, &sp.TurnStarted, &sp.Step, &sp.StepAt,
+			&sp.LastTurnAt, &sp.LastTurnSecs, &sp.LastResult, &sp.LastFailed, &sp.ResetPending); err != nil {
 			return nil, err
 		}
 		out = append(out, sp)

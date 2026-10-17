@@ -21,6 +21,7 @@ type Backend interface {
 
 	CreateChannel(name, desc string) error
 	DeleteChannel(name string) error
+	ClearChannel(name string) (int64, error)
 	JoinChannel(channel, agent string) error
 	LeaveChannel(channel, agent string) error
 	Channels() ([]Channel, error)
@@ -32,6 +33,9 @@ type Backend interface {
 	ClaimSpawnWait(ctx context.Context, node string, d time.Duration) (*Spawn, error)
 	UpdateSpawn(id int64, status, sessionID string, pid int, errMsg string) error
 	SpawnStatus(id int64) (string, error)
+	SetActivity(id int64, a Activity) error
+	ResetSession(agent string) error
+	TakeReset(id int64) (bool, error)
 	StopSpawn(agent string) error
 	Spawns(limit int) ([]Spawn, error)
 

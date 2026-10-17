@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0a0c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>gary — sign in</title>
 <style>
   body { font: 14px/1.4 -apple-system, system-ui, sans-serif; background: #0b0b0c; color: #ddd;
@@ -31,5 +35,9 @@
   <input id="p" name="password" type="password" autocomplete="current-password" required>
   <button type="submit">sign in</button>
 </form>
+<script>
+// Installable as an app (see pwa/sw.js); harmless where service workers are unavailable.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
 </body>
 </html>

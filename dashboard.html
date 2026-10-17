@@ -2,7 +2,11 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>gary dashboard</title>
 <style>
   :root {
@@ -113,6 +117,8 @@
   .roomhead .title { font-weight: 600; }
   .roomhead .desc { color: var(--dim); font-size: .84rem; margin-left: .5rem; }
   .roomhead .members { margin-top: .45rem; display: flex; gap: .35rem; flex-wrap: wrap; }
+  .roomhead .top { display: flex; align-items: baseline; gap: .5rem; }
+  .roomhead .top .spacer { flex: 1; }
   .transcript { flex: 1; overflow-y: auto; padding: 1.25rem; display: flex; flex-direction: column; gap: .9rem; }
 
   .post { display: flex; gap: .7rem; animation: rise .25s ease-out; }
@@ -168,7 +174,8 @@
   }
 
   /* ---------- tables ---------- */
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+          overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; }
   th {
     text-align: left; color: var(--faint); font-weight: 600; font-size: .72rem;
@@ -195,10 +202,57 @@
     padding: .12rem .55rem; font-size: .76rem; cursor: pointer; transition: border-color .15s, color .15s;
   }
   .stop:hover { border-color: var(--red); color: var(--red); }
+  .reset:hover, .clear:hover { border-color: var(--amber); color: var(--amber); }
+  .actions { white-space: nowrap; display: flex; gap: .35rem; }
+  .fresh { color: var(--amber); font-size: .78rem; }
+
+  /* ---------- live activity ---------- */
+  .agentname { font-weight: 500; }
+  .agentsub { display: block; font: .74rem var(--mono); color: var(--faint); margin-top: .1rem; }
+  .status.working { background: #14331d; color: var(--green); }
+  .status.idle    { background: #24242b; color: var(--dim); }
+  .status.offline { background: #38161a; color: var(--red); }
+  .status.working::before {
+    content: ""; display: inline-block; width: .45rem; height: .45rem; border-radius: 999px;
+    background: var(--green); margin-right: .4rem; vertical-align: .05rem; animation: beat 1.4s ease-in-out infinite;
+  }
+  @keyframes beat { 50% { opacity: .25; } }
+  .doing { min-width: 18rem; max-width: 40rem; }
+  .doing .turn { color: var(--dim); font-size: .82rem; }
+  .doing .turn .ask { color: var(--faint); }
+  .step { display: block; margin-top: .2rem; font: .8rem/1.4 var(--mono); color: var(--text);
+          overflow-wrap: anywhere; }
+  .step .age { color: var(--faint); font-family: inherit; }
+  .step.warn .age { color: var(--amber); }
+  .step.stuck { color: var(--red); }
+  .step.stuck .age { color: var(--red); font-weight: 600; }
+  .idle-note { color: var(--faint); }
+  .lastturn { white-space: nowrap; color: var(--dim); font-size: .84rem; }
+  .lastturn.failed { color: var(--red); }
+
+  .results { display: grid; gap: .8rem; }
+  .result { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+  .result.failed { border-color: #5a2228; }
+  .result .rhead { display: flex; gap: .6rem; align-items: baseline; padding: .55rem .8rem;
+                   border-bottom: 1px solid var(--line-soft); font-size: .84rem; color: var(--dim); }
+  .result .rhead b { color: var(--text); font-weight: 600; }
+  .result .rbody { padding: .65rem .8rem; white-space: pre-wrap; overflow-wrap: anywhere;
+                   max-height: 18rem; overflow-y: auto; font-size: .86rem; }
 
   @media (max-width: 720px) {
-    .rooms { grid-template-columns: 1fr; }
+    .rooms { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .roomlist { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
+    header { padding: .6rem 1rem; padding-top: max(.6rem, env(safe-area-inset-top)); }
+    .brand .dbpath { display: none; }
+    nav.tabs { padding: .45rem .5rem 0; overflow-x: auto; }
+    .tab { padding: .45rem .6rem .55rem; }
+    .pad { padding: 1rem; }
+    .transcript { padding: 1rem; }
+    .composer { padding: .7rem 1rem calc(.8rem + env(safe-area-inset-bottom)); }
+    .composer .foot .hint { font-size: .72rem; }
+    table { min-width: 40rem; }
+    .doing { min-width: 14rem; }
+    .result .rhead { flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -262,11 +316,14 @@
       <h2>live agents</h2>
       <div class="card" id="spawns-card">
         <table>
-          <thead><tr><th>agent</th><th>node</th><th>status</th><th>repo</th><th>model</th><th>queue</th><th>started</th><th></th></tr></thead>
+          <thead><tr><th>agent</th><th>state</th><th>doing</th><th>queue</th><th>last turn</th><th></th></tr></thead>
           <tbody id="spawns"></tbody>
         </table>
       </div>
       <div class="empty" id="spawns-empty" style="display:none">no spawned agents — <code>gary spawn &lt;name&gt; --node &lt;machine&gt; --repo &lt;path&gt;</code></div>
+
+      <h2 id="results-title">last results</h2>
+      <div class="results" id="results"></div>
 
       <h2>registry</h2>
       <div class="chips" id="agents-all"></div>
@@ -366,9 +423,14 @@ function renderRoom() {
     return;
   }
   paint("room-head", `
-    <div><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span></div>
+    <div class="top"><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span>
+      <span class="spacer"></span>
+      ${state.api ? `<button class="stop clear" id="clear-room">clear room</button>` : ""}</div>
     <div class="members">${(chan.members || []).map(m =>
       `<span class="chip sm">${esc(m)}</span>`).join("") || `<span class="hint">nobody has joined yet</span>`}</div>`);
+
+  const clearBtn = $("clear-room");
+  if (clearBtn) clearBtn.onclick = () => clearRoom(chan.name);
 
   const posts = roomPosts(chan.name);
   const el = $("transcript");
@@ -402,6 +464,22 @@ function setComposer(chan) {
   if (!chan) return;
   if (!state.api) hint.innerHTML = `read-only view — run <code>gary serve</code> to post`;
   else hint.innerHTML = `posting as <b>${esc(state.me)}</b> · Enter to send, Shift+Enter for a newline`;
+}
+
+// Clearing deletes the room's posts and gives its agents a fresh claude session
+// on their next message, so the room really starts over rather than just looking
+// empty while every member still remembers it.
+async function clearRoom(name) {
+  const n = roomPosts(name).length;
+  if (!confirm(`Clear #${name}?\n\nDeletes ${n} post${n === 1 ? "" : "s"} (unread ones too) and gives every ` +
+               `agent in the room fresh context on its next message. This can't be undone.`)) return;
+  const resp = await fetch("v1/channels/clear", {method: "POST", headers: H, body: JSON.stringify({Name: name})});
+  const hint = $("compose-hint");
+  if (!resp.ok) {
+    hint.classList.add("bad");
+    hint.textContent = (await resp.json().catch(() => ({}))).error || "clear failed";
+  }
+  tick();
 }
 
 async function post(channel, body) {
@@ -473,6 +551,13 @@ function renderInbox() {
 
 /* ---------------- agents ---------------- */
 
+async function resetAgent(name) {
+  if (!confirm(`Give "${name}" fresh context?\n\nIts next message starts a new claude session with no memory of ` +
+               `earlier turns. A turn already running finishes first.`)) return;
+  await fetch("v1/spawns/reset", {method: "POST", headers: H, body: JSON.stringify({Agent: name})});
+  tick();
+}
+
 async function stopAgent(name) {
   if (!confirm(`Stop agent "${name}" after its current turn?`)) return;
   await fetch("v1/spawns/stop", {method: "POST", headers: H, body: JSON.stringify({Agent: name})});
@@ -492,29 +577,81 @@ function renderAgents() {
   }).join(""));
 
   const live = (state.spawns || []).filter(s => LIVE.has(s.status));
+  const nodeUp = name => nodes.some(n => n.name === name && now - n.last_seen < staleAfter);
   $("spawns-empty").style.display = live.length ? "none" : "block";
   $("spawns-card").style.display = live.length ? "" : "none";
   paint("spawns", live.map(s => {
     const pending = (state.messages || []).filter(m => m.to === s.agent && m.status === "pending").length;
+    const st = agentState(s, nodeUp(s.node));
     return `<tr>
-      <td>${esc(s.agent)}</td>
-      <td>${esc(s.node)}</td>
-      <td><span class="status ${s.status}">${s.status}</span></td>
-      <td class="mono">${esc(s.repo)}</td>
-      <td class="mono">${esc(s.model || "default")}</td>
-      <td>${pending ? `<span class="badge">${pending}</span> waiting` : "idle"}</td>
-      <td>${ago(s.created_at)}</td>
-      <td>${state.api ? `<button class="stop" data-agent="${esc(s.agent)}">stop</button>` : ""}</td>
+      <td><span class="agentname">${esc(s.agent)}</span>
+        <span class="agentsub">${esc(s.node)} · ${esc(s.model || "default model")}</span>
+        <span class="agentsub">${esc(s.repo)}</span></td>
+      <td><span class="status ${st}">${st}</span></td>
+      <td class="doing">${doing(s, st)}${s.reset_pending ? `<div class="fresh">fresh context on next message</div>` : ""}</td>
+      <td>${pending ? `<span class="badge">${pending}</span> waiting` : `<span class="idle-note">empty</span>`}</td>
+      <td>${s.last_turn_at ? `<span class="lastturn ${s.last_failed ? "failed" : ""}">${
+        s.last_failed ? "failed" : "finished"} ${ago(s.last_turn_at)}<br>took ${dur(s.last_turn_secs)}</span>`
+        : `<span class="idle-note">none yet</span>`}</td>
+      <td>${state.api ? `<div class="actions">
+        <button class="stop reset" data-reset="${esc(s.agent)}">reset</button>
+        <button class="stop" data-agent="${esc(s.agent)}">stop</button></div>` : ""}</td>
     </tr>`;
   }).join(""));
-  document.querySelectorAll("button.stop").forEach(el => {
+
+  // Results repaint only when a turn finishes, so text in them stays selectable.
+  const done = live.filter(s => s.last_turn_at).sort((a, b) => b.last_turn_at - a.last_turn_at);
+  $("results-title").style.display = done.length ? "" : "none";
+  paint("results", done.map(s => `<div class="result ${s.last_failed ? "failed" : ""}">
+      <div class="rhead"><b>${esc(s.agent)}</b>
+        <span>${s.last_failed ? "failed" : "finished"} ${new Date(s.last_turn_at * 1000).toLocaleString()}</span>
+        <span>· took ${dur(s.last_turn_secs)}</span></div>
+      <div class="rbody">${esc(s.last_result || "(no output)")}</div>
+    </div>`).join(""));
+  document.querySelectorAll("button[data-agent]").forEach(el => {
     el.onclick = () => stopAgent(el.dataset.agent);
+  });
+  document.querySelectorAll("button[data-reset]").forEach(el => {
+    el.onclick = () => resetAgent(el.dataset.reset);
   });
 
   paint("agents-all", (state.agents || []).map(a =>
     `<div class="chip">${esc(a.name)}${a.node ? `<span class="sub">${esc(a.node)}</span>` : ""}
       <span class="sub">${ago(a.last_seen)}</span></div>`).join("")
     || `<span class="hint">no agents registered</span>`);
+}
+
+// A spawn row reads "running" from the moment it starts until it stops; the
+// node's activity report is what splits that into working and idle.
+function agentState(s, nodeUp) {
+  if (s.status !== "running") return s.status;
+  if (!nodeUp) return "offline";
+  return s.turn_msg ? "working" : "idle";
+}
+
+function dur(secs) {
+  secs = Math.max(0, Math.round(secs));
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.floor(secs / 60) + "m " + (secs % 60) + "s";
+  return Math.floor(secs / 3600) + "h " + Math.floor(secs % 3600 / 60) + "m";
+}
+
+// One step running for minutes is the signature of a hang (a wait loop, a
+// prompt nobody will answer); a long turn made of many short steps is just work.
+const STEP_WARN = 120, STEP_STUCK = 600;
+
+function doing(s, st) {
+  if (st === "offline") return `<span class="idle-note">node not checking in — state unknown</span>`;
+  if (st !== "working") return `<span class="idle-note">${st === "idle" ? "waiting for mail" : ""}</span>`;
+  const now = Date.now() / 1000;
+  const msg = (state.messages || []).find(m => m.id === s.turn_msg);
+  const ask = msg ? msg.body.replace(/\s+/g, " ").slice(0, 90) + (msg.body.length > 90 ? "…" : "") : "";
+  const age = now - (s.step_at || s.turn_started);
+  const cls = age >= STEP_STUCK ? "stuck" : age >= STEP_WARN ? "warn" : "";
+  return `<div class="turn">#${s.turn_msg} from ${esc(s.turn_from)} · ${dur(now - s.turn_started)}
+      ${ask ? `<span class="ask">— ${esc(ask)}</span>` : ""}</div>
+    <span class="step ${cls}">${esc(s.step || "starting")} <span class="age">· ${dur(age)}${
+      cls === "stuck" ? " on this step — may be stuck" : ""}</span></span>`;
 }
 
 /* ---------------- shell ---------------- */
@@ -535,9 +672,10 @@ function render() {
   const nodes = state.nodes || [];
   const staleAfter = state.stale_after || 90, now = Date.now() / 1000;
   const up = nodes.filter(n => now - n.last_seen < staleAfter).length;
-  const running = (state.spawns || []).filter(s => LIVE.has(s.status)).length;
+  const running = (state.spawns || []).filter(s => LIVE.has(s.status));
+  const working = running.filter(s => s.status === "running" && s.turn_msg).length;
   paint("pulse", `<span class="dot ${nodes.length && up ? "up" : "stale"}"></span>
-    ${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running} agent${running === 1 ? "" : "s"} running`);
+    ${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running.length} agent${running.length === 1 ? "" : "s"}, ${working} working`);
 
   $("c-rooms").textContent = (state.channels || []).length;
   $("c-inbox").textContent = (state.messages || []).filter(m => m.status === "pending").length;
@@ -574,6 +712,8 @@ $("compose").addEventListener("keydown", e => {
 setTab(tab);
 tick();
 setInterval(tick, 1000);
+// Installable as an app (see pwa/sw.js); harmless where service workers are unavailable.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 </body>
 </html>

@@ -52,6 +52,7 @@ func hubHandler(s *Store, o serveOpts) http.Handler {
 	}
 	registerDashboard(mux, s, o)
 	registerLogin(mux, o)
+	registerPWA(mux)
 	return authMiddleware(o, mux)
 }
 
@@ -102,6 +103,36 @@ func registerLogin(mux *http.ServeMux, o serveOpts) {
 		w.Header().Set("Location", "./login")
 		w.WriteHeader(http.StatusFound)
 	})
+}
+
+// pwaFiles is what a phone needs to install the dashboard as an app. A browser
+// fetches the manifest and service worker without the session cookie, so these
+// are served to anyone; they are static and carry no data.
+var pwaFiles = map[string]string{
+	"/manifest.webmanifest": "application/manifest+json",
+	"/sw.js":                "text/javascript; charset=utf-8",
+	"/icon-192.png":         "image/png",
+	"/icon-512.png":         "image/png",
+	"/icon-maskable.png":    "image/png",
+}
+
+func registerPWA(mux *http.ServeMux) {
+	for p, ctype := range pwaFiles {
+		body, err := pwaFS.ReadFile("pwa" + p)
+		if err != nil {
+			continue // embedded at build time; unreachable unless pwa/ loses a file
+		}
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", ctype)
+			// The worker must be re-checked on every load or an update never lands.
+			if p == "/sw.js" {
+				w.Header().Set("Cache-Control", "no-cache")
+			} else {
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+			}
+			w.Write(body)
+		})
+	}
 }
 
 func writeLogin(w http.ResponseWriter, errMsg string, status int) {
@@ -178,7 +209,7 @@ func isLoopback(host string) bool {
 func authMiddleware(o serveOpts, next http.Handler) http.Handler {
 	open := o.token == "" && o.users.empty()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
+		if _, static := pwaFiles[r.URL.Path]; static || r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -296,6 +327,17 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 		}
 		return ok{}, s.DeleteChannel(in.Name)
 	})
+	handle(mux, "/v1/channels/clear", func(r *http.Request) (any, error) {
+		var in struct{ Name string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		n, err := s.ClearChannel(in.Name)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]int64{"deleted": n}, nil
+	})
 	handle(mux, "/v1/channels/join", func(r *http.Request) (any, error) {
 		var in struct{ Channel, Agent string }
 		if err := decode(r, &in); err != nil {
@@ -378,6 +420,36 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 			return nil, err
 		}
 		return ok{}, s.UpdateSpawn(in.ID, in.Status, in.SessionID, in.PID, in.Error)
+	})
+	handle(mux, "/v1/spawns/activity", func(r *http.Request) (any, error) {
+		var in struct {
+			ID       int64    `json:"id"`
+			Activity Activity `json:"activity"`
+		}
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.SetActivity(in.ID, in.Activity)
+	})
+	handle(mux, "/v1/spawns/reset", func(r *http.Request) (any, error) {
+		var in struct{ Agent string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		return ok{}, s.ResetSession(in.Agent)
+	})
+	handle(mux, "/v1/spawns/take-reset", func(r *http.Request) (any, error) {
+		var in struct {
+			ID int64 `json:"id"`
+		}
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		taken, err := s.TakeReset(in.ID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]bool{"reset": taken}, nil
 	})
 	handle(mux, "/v1/spawns/stop", func(r *http.Request) (any, error) {
 		var in struct{ Agent string }

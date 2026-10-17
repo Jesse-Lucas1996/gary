@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	_ "embed"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -25,6 +25,9 @@ var dashboardHTML []byte
 //go:embed login.html
 var loginHTML []byte
 
+//go:embed pwa
+var pwaFS embed.FS
+
 const modulePath = "github.com/Jesse-Lucas1996/gary"
 
 const version = "0.2.0"
@@ -44,6 +47,7 @@ Messaging:
 Channels (one message, every member):
   gary channel new <name> [--description <t>]   create or update a shared channel
   gary channel rm <name>                        delete a channel
+  gary channel clear <name>                     delete its posts, reset its agents' context
   gary channel join <name> --agent <a>          put an agent on a channel
   gary channel leave <name> --agent <a>         take an agent off a channel
   gary channels                                 list channels and their members
@@ -60,6 +64,7 @@ Claude agents:
   gary spawn <agent> --node <m> --repo <path>   start a claude agent on a node
   gary spawns                                   list spawns and their status
   gary stop <agent>                             wind an agent down after its current turn
+  gary reset <agent>                            fresh claude session from its next message
 
 Other:
   gary dashboard [--addr localhost:4777]        live HTML view (no API)
@@ -407,11 +412,25 @@ func run(args []string) error {
 				return nil
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tAGENT\tNODE\tSTATUS\tREPO\tNOTE")
+			fmt.Fprintln(tw, "ID\tAGENT\tNODE\tSTATUS\tDOING\tREPO\tNOTE")
 			for _, s := range spawns {
-				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Agent, s.Node, s.Status, s.Repo, oneline(s.Error))
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					s.ID, s.Agent, s.Node, s.Status, doing(s), s.Repo, oneline(s.Error))
 			}
 			return tw.Flush()
+		})
+
+	case "reset":
+		name, err := parse1(fs, rest, "reset <agent>")
+		if err != nil {
+			return err
+		}
+		return c.with(func(b Backend) error {
+			if err := b.ResetSession(name); err != nil {
+				return err
+			}
+			fmt.Printf("%s will start a fresh session on its next message\n", name)
+			return nil
 		})
 
 	case "stop":
@@ -493,7 +512,7 @@ func openUsers() (*userStore, error) {
 // and --db/--url/--json keep working here like everywhere else.
 func channelCmd(c conn, args []string, desc, agent string) error {
 	const use = "usage: gary channel new <name> [--description <text>] | gary channel rm <name> | " +
-		"gary channel join|leave <name> --agent <a>"
+		"gary channel clear <name> | gary channel join|leave <name> --agent <a>"
 	if len(args) != 2 {
 		return fmt.Errorf("%s", use)
 	}
@@ -503,6 +522,15 @@ func channelCmd(c conn, args []string, desc, agent string) error {
 		return c.with(func(b Backend) error { return b.CreateChannel(name, desc) })
 	case "rm":
 		return c.with(func(b Backend) error { return b.DeleteChannel(name) })
+	case "clear":
+		return c.with(func(b Backend) error {
+			n, err := b.ClearChannel(name)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("cleared %s: %d message rows deleted; its agents start fresh on their next message\n", name, n)
+			return nil
+		})
 	case "join", "leave":
 		if agent == "" {
 			return fmt.Errorf("usage: gary channel %s <name> --agent <a>", sub)
@@ -675,6 +703,19 @@ func ago(unix int64) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// doing summarises a spawn's live turn: the message, how long the turn has run,
+// and the step it is on with that step's own age — the number that shows a hang.
+func doing(s Spawn) string {
+	if s.Status != "running" && s.Status != "stopping" {
+		return "-"
+	}
+	if s.TurnMsg == 0 {
+		return "idle"
+	}
+	since := func(t int64) string { return time.Since(time.Unix(t, 0)).Round(time.Second).String() }
+	return clip(fmt.Sprintf("#%d for %s, this step %s: %s", s.TurnMsg, since(s.TurnStarted), since(s.StepAt), s.Step), 90)
 }
 
 func nodeStatus(lastSeen int64) string {

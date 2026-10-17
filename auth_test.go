@@ -262,3 +262,33 @@ func TestLoginWorksUnderSubPath(t *testing.T) {
 		t.Fatalf("API under sub-path: %v", err)
 	}
 }
+
+func TestPWAFilesAreServedWithoutASession(t *testing.T) {
+	users := testUsers(t, "admin", "test-password")
+	s := testStore(t)
+	outer := http.NewServeMux()
+	outer.Handle("/gary/", http.StripPrefix("/gary",
+		hubHandler(s, serveOpts{token: testToken, api: true, users: users})))
+	srv := httptest.NewServer(outer)
+	defer srv.Close()
+
+	for p, ctype := range pwaFiles {
+		resp, err := http.Get(srv.URL + "/gary" + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != ctype {
+			t.Errorf("%s: %d %q, want 200 %q", p, resp.StatusCode, resp.Header.Get("Content-Type"), ctype)
+		}
+	}
+	// The exemption is those files only: data stays behind the login.
+	resp, err := http.Get(srv.URL + "/gary/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("api/state without a session: %d, want 401", resp.StatusCode)
+	}
+}

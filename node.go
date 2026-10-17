@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -126,6 +128,7 @@ func (r *runner) supervise(ctx context.Context, sp *Spawn) {
 		return
 	}
 	_ = r.b.UpdateSpawn(sp.ID, "running", "", 0, "")
+	r.report(sp, Activity{}) // a node that died mid-turn left its last step behind
 	fmt.Printf("gary node: agent %q running in %s\n", sp.Agent, sp.Repo)
 
 	waitCtx, stopWaiting := context.WithCancel(ctx)
@@ -133,7 +136,8 @@ func (r *runner) supervise(ctx context.Context, sp *Spawn) {
 	var asked atomic.Bool
 	go r.watchStop(waitCtx, sp, &asked, stopWaiting)
 
-	session := ""
+	// A requeued spawn carries the session it had, so the agent keeps its context.
+	session := sp.SessionID
 	for ctx.Err() == nil && !asked.Load() {
 		m, err := r.b.RecvWait(waitCtx, sp.Agent, recvWait)
 		if err != nil {
@@ -148,12 +152,31 @@ func (r *runner) supervise(ctx context.Context, sp *Spawn) {
 			continue
 		}
 		fmt.Printf("gary node: %s <- %s (#%d)\n", sp.Agent, m.From, m.ID)
+		if fresh, err := r.b.TakeReset(sp.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "gary node: %s: reset check: %v\n", sp.Agent, err)
+		} else if fresh {
+			session = ""
+			fmt.Printf("gary node: %s: context reset, starting a fresh session\n", sp.Agent)
+		}
 
-		out, newSession, err := r.turn(ctx, sp, session, m)
+		started := time.Now()
+		live := Activity{TurnMsg: m.ID, TurnFrom: m.From, TurnStarted: started.Unix()}
+		step := func(what string) {
+			live.Step, live.StepAt = what, time.Now().Unix()
+			r.report(sp, live)
+		}
+		step("starting claude")
+		out, newSession, err := r.turn(ctx, sp, session, m, step)
+		if err != nil && ctx.Err() != nil {
+			return
+		}
+		done := Activity{LastTurnAt: time.Now().Unix(), LastTurnSecs: int64(time.Since(started).Round(time.Second).Seconds()),
+			LastResult: clip(out, maxResult)}
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
+			done.LastResult, done.LastFailed = err.Error(), true
+		}
+		r.report(sp, done)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "gary node: %s: %v\n", sp.Agent, err)
 			r.answer(sp.Agent, m, fmt.Sprintf("agent %q failed to handle your message: %v", sp.Agent, err))
 			continue
@@ -189,8 +212,20 @@ func (r *runner) watchStop(ctx context.Context, sp *Spawn, asked *atomic.Bool, c
 	}
 }
 
-func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message) (string, string, error) {
-	args := []string{"-p", "--output-format", "json", "--permission-mode", sp.PermissionMode}
+// report publishes what an agent is doing. It is best-effort: a hub that is
+// briefly unreachable, or too old to know the endpoint, costs the dashboard a
+// step, never the turn.
+func (r *runner) report(sp *Spawn, a Activity) {
+	if err := r.b.SetActivity(sp.ID, a); err != nil {
+		fmt.Fprintf(os.Stderr, "gary node: %s: activity: %v\n", sp.Agent, err)
+	}
+}
+
+// turn runs one claude invocation. Output is stream-json so the node sees each
+// tool call as it starts and can hand it to step; that is the only way to tell
+// a long turn that is working from one blocked on a single command.
+func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message, step func(string)) (string, string, error) {
+	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", sp.PermissionMode}
 	if session == "" {
 		args = append(args, "--session-id", newSessionID())
 	} else {
@@ -210,24 +245,120 @@ func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message
 	cmd.Dir = sp.Repo
 	cmd.Stdin = strings.NewReader(inbound(m))
 	cmd.Stderr = os.Stderr
-	raw, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", "", fmt.Errorf("claude: %w", err)
 	}
-
-	var res struct {
-		Result    string `json:"result"`
-		SessionID string `json:"session_id"`
-		IsError   bool   `json:"is_error"`
-		Subtype   string `json:"subtype"`
+	if err := cmd.Start(); err != nil {
+		return "", "", fmt.Errorf("claude: %w", err)
 	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return "", "", fmt.Errorf("parse claude output: %w", err)
+	res, found := readStream(stdout, step)
+	if err := cmd.Wait(); err != nil {
+		return "", "", fmt.Errorf("claude: %w", err)
+	}
+	if !found {
+		return "", "", fmt.Errorf("claude exited without a result")
 	}
 	if res.IsError {
 		return "", res.SessionID, fmt.Errorf("claude reported an error (%s): %s", res.Subtype, res.Result)
 	}
 	return res.Result, res.SessionID, nil
+}
+
+type streamResult struct {
+	Result    string `json:"result"`
+	SessionID string `json:"session_id"`
+	IsError   bool   `json:"is_error"`
+	Subtype   string `json:"subtype"`
+}
+
+// readStream consumes claude's stream-json output to EOF — stopping early would
+// leave claude blocked on a full pipe — turning tool calls into steps and
+// returning the final result event. Lines it cannot parse are skipped.
+func readStream(rd io.Reader, step func(string)) (streamResult, bool) {
+	var res streamResult
+	found := false
+	br := bufio.NewReader(rd)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			var ev struct {
+				Type    string `json:"type"`
+				Message struct {
+					Content []struct {
+						Type  string          `json:"type"`
+						Name  string          `json:"name"`
+						Input json.RawMessage `json:"input"`
+					} `json:"content"`
+				} `json:"message"`
+				streamResult
+			}
+			if json.Unmarshal(line, &ev) == nil {
+				switch ev.Type {
+				case "result":
+					res, found = ev.streamResult, true
+				case "assistant":
+					var tools []string
+					wrote := false
+					for _, c := range ev.Message.Content {
+						switch c.Type {
+						case "tool_use":
+							tools = append(tools, describeTool(c.Name, c.Input))
+						case "text":
+							wrote = true
+						}
+					}
+					switch {
+					case len(tools) == 1:
+						step(tools[0])
+					case len(tools) > 1:
+						step(fmt.Sprintf("%s (+%d more in parallel)", tools[0], len(tools)-1))
+					case wrote:
+						step("writing")
+					}
+				case "user":
+					step("thinking")
+				}
+			}
+		}
+		if err != nil {
+			return res, found
+		}
+	}
+}
+
+// describeTool renders a tool call as one line, naming the thing it acts on —
+// for Bash the command itself, since that is what you need to see when it hangs.
+func describeTool(name string, raw json.RawMessage) string {
+	var in struct {
+		Command     string `json:"command"`
+		FilePath    string `json:"file_path"`
+		Path        string `json:"path"`
+		Pattern     string `json:"pattern"`
+		URL         string `json:"url"`
+		Query       string `json:"query"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(raw, &in)
+	for _, v := range []string{in.Command, in.FilePath, in.Pattern, in.URL, in.Query, in.Description, in.Path} {
+		if v = strings.Join(strings.Fields(v), " "); v != "" {
+			return clip(name+": "+v, maxStep)
+		}
+	}
+	return name
+}
+
+const (
+	maxStep   = 240
+	maxResult = 4000
+)
+
+func clip(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 func systemPrompt(sp *Spawn) string {

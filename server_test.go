@@ -263,3 +263,65 @@ func TestCheckBind(t *testing.T) {
 		})
 	}
 }
+
+func TestClientActivity(t *testing.T) {
+	c, s := testHub(t)
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := c.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: "/tmp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Activity{TurnMsg: 3, TurnFrom: "planner", TurnStarted: 10, Step: "Bash: ls", StepAt: 11}
+	if err := c.SetActivity(id, want); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := c.Spawns(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp[0].Activity != want {
+		t.Fatalf("activity over the wire: got %+v, want %+v", sp[0].Activity, want)
+	}
+}
+
+func TestClientClearAndReset(t *testing.T) {
+	c, s := testHub(t)
+	for _, n := range []string{"lead", "coder"} {
+		if err := c.RegisterOn(n, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := c.Spawn(SpawnSpec{Agent: "coder", Node: "n1", Repo: "/tmp"})
+	if err := c.UpdateSpawn(id, "running", "", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateChannel("room", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JoinChannel("room", "coder"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Post("lead", "room", "hello room"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.ClearChannel("room"); err != nil || n != 1 {
+		t.Fatalf("clear over the wire: %d %v", n, err)
+	}
+	if _, err := c.ClearChannel("nope"); !errors.Is(err, ErrUnregistered) {
+		t.Fatalf("unknown channel lost its error identity: %v", err)
+	}
+	if taken, err := c.TakeReset(id); err != nil || !taken {
+		t.Fatalf("clear should have reset the member: %v %v", taken, err)
+	}
+	if err := c.ResetSession("coder"); err != nil {
+		t.Fatal(err)
+	}
+	if taken, _ := c.TakeReset(id); !taken {
+		t.Fatal("reset over the wire was not recorded")
+	}
+}

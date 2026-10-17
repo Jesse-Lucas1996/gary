@@ -61,6 +61,7 @@ gary watch <name> [--interval 1s]             block, printing+acking messages as
 
 gary channel new <name> [--description <t>]   create or update a shared channel
 gary channel rm <name>                        delete a channel
+gary channel clear <name>                     delete its posts, reset its agents' context
 gary channel join|leave <name> --agent <a>    put an agent on / take it off a channel
 gary channels                                 list channels and their members
 gary post <channel> --from <me> [message]     fan out to every member but the sender
@@ -74,6 +75,7 @@ gary nodes                                    list machines that have checked in
 gary spawn <agent> --node <m> --repo <path>   start a claude agent on a node
 gary spawns                                   list spawns and their status
 gary stop <agent>                             wind an agent down after its current turn
+gary reset <agent>                            fresh claude session from its next message
 
 gary dashboard [--addr localhost:4777]        live HTML view, no API
 gary update                                   rebuild+install via go install
@@ -170,6 +172,42 @@ turn's context, so a stop is noticed within seconds while a claude already
 running still finishes. Cancelling the turn context instead would kill claude
 mid-turn, which is exactly what this design refuses to do.
 
+### Activity
+
+`running` only says a spawn has not stopped; it reads the same for an agent
+waiting for mail, one deep in useful work, and one blocked for twenty minutes on
+a command that will never return. So the node runs claude with
+`--output-format stream-json --verbose` and reports what it sees through
+`SetActivity`: the message a turn is handling, and the step inside it — each
+tool call as it starts (`Bash: <command>`, `Read: <path>`), `thinking` after a
+tool returns, `writing` for text. A turn's end clears the live fields and records
+how long it took and what it returned (or the error), which is how a result
+nobody asked a reply for still reaches the operator. The dashboard reads the age
+of the current step as the health signal: one step running for minutes is what a
+hang looks like, while a long turn made of short steps is just work.
+
+Reporting is best-effort. A failed report is logged and costs a dashboard
+update, never the turn, and a node clears stale activity when it starts an agent,
+so a crash mid-turn does not leave a phantom step behind. Streaming steps does
+not touch invariant 9: the argv is still constants plus typed fields.
+
+### Resetting context
+
+`gary reset <agent>` (or the dashboard's reset button) gives an agent a clean
+slate: its next turn starts a new session instead of resuming. It is a
+`reset_pending` flag that the node consumes with `TakeReset` before each turn,
+not a direct wipe of `session_id`, because a turn already running writes its
+session back when it ends and would silently undo the reset. So a reset never
+interrupts a turn; it lands on the next message.
+
+`gary channel clear <name>` is the room-level version: it deletes every message
+posted to the channel, unread ones included, and flags every member with a live
+spawn for a reset, in one transaction. A room that only looked empty while its
+agents still remembered it would not be a fresh start.
+
+A requeued spawn keeps its `session_id`, so a node that re-claims an agent after
+a restart resumes its conversation rather than starting over.
+
 ## Reply gating (the loop breaker)
 
 Two spawned agents talking to each other used to run forever. The cause was
@@ -253,6 +291,12 @@ without needing server-side session state. Failed logins are rate-limited per
 client IP (5 attempts, then a lockout), and an unknown username still pays the
 full PBKDF2 cost so timing does not reveal which names exist.
 
+The PWA files (`pwa/`: manifest, service worker, icons) are the only paths
+served without either credential, because a browser fetches them without the
+session cookie when installing the app. They are static and carry no data; the
+service worker caches only the icons and never the dashboard, the API or the
+login page.
+
 With no users configured, the hub falls back to token-only: an API client gets
 401, and a browser gets 401 rather than a login page it cannot use.
 
@@ -317,7 +361,18 @@ CREATE TABLE spawns (
     pid             INTEGER,
     error           TEXT,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    -- activity: the live turn, reported by the node (see Activity)
+    turn_msg        INTEGER NOT NULL DEFAULT 0,  -- message being handled, 0 = idle
+    turn_from       TEXT NOT NULL DEFAULT '',
+    turn_started    INTEGER NOT NULL DEFAULT 0,
+    step            TEXT NOT NULL DEFAULT '',    -- e.g. "Bash: make test"
+    step_at         INTEGER NOT NULL DEFAULT 0,
+    last_turn_at    INTEGER NOT NULL DEFAULT 0,  -- how the previous turn ended
+    last_turn_secs  INTEGER NOT NULL DEFAULT 0,
+    last_result     TEXT NOT NULL DEFAULT '',    -- result or error, clipped to 4000 chars
+    last_failed     INTEGER NOT NULL DEFAULT 0,
+    reset_pending   INTEGER NOT NULL DEFAULT 0   -- next turn starts a fresh session
 );
 
 CREATE INDEX idx_inbox ON messages(to_agent, status, id);
@@ -327,7 +382,8 @@ CREATE INDEX idx_claim ON spawns(node, status, id);
 **A channel owns its membership, not its mail.** Deleting a channel cascades the
 membership rows away and leaves every message it already fanned out — by then
 those are ordinary mail in someone's inbox, and `channel` on them is history, not
-a reference. Same reasoning as `from_agent` below.
+a reference. Same reasoning as `from_agent` below. The one exception is
+`channel clear`, where the operator is asking for exactly that mail to go.
 
 **`from_agent` has no foreign key, on purpose.** Sent messages outlive their
 sender: unregistering an agent drops its own inbox (that is what `to_agent`'s
@@ -367,6 +423,7 @@ node.go        # the runner: claims spawns, supervises claude
 auth.go        # password hashing, session cookies, login rate limit
 dashboard.html # embedded live view
 login.html     # embedded sign-in page
+pwa/           # embedded installable-app files: manifest, service worker, icons
 main_test.go   # CLI arg handling that has bitten before (flag reordering)
 store_test.go  # queue semantics, reply gating and channel fan-out, temp-file DB
 server_test.go # the same semantics over HTTP, plus token auth and bind
@@ -440,6 +497,15 @@ needs a network or a credential. What the suite must keep covering:
 - **Spawning** — atomic claim under concurrency, the exact `claude` argv and
   cwd, `--session-id` on the first turn and `--resume` after, a pleasantry reply
   dropped silently, and one full message→turn→reply round trip.
+- **Activity** — stream-json parsed into steps (tool calls, parallel calls,
+  unparseable lines skipped, no result = no result), going idle keeping the last
+  turn, the same over HTTP, and a finished turn recorded end to end.
+- **Reset and clear** — a reset consumed exactly once and dropping the session,
+  the node starting a fresh session after one, `channel clear` deleting only
+  that channel's mail and resetting only its running members, a re-claimed
+  spawn keeping its session, and the same over HTTP.
+- **PWA** — the app files served without a session under `/gary/`, and nothing
+  else exempted.
 - **Migration** — opening a database written by an older schema, preserving ids
   and FIFO order, defaulting the added columns, gaining the channel tables, and
   staying idempotent when `migrate()` runs again.
@@ -451,7 +517,8 @@ Test fixtures must never contain a real credential; the repository is public.
 - Message retention / `gary purge` for old `acked` rows.
 - Multiple hubs / replication. One hub is the single serializer; that is what
   makes invariants 1, 2 and 8 cheap. Federating them is a different tool.
-- Streaming a spawned agent's intermediate output. Turns are request/response;
-  `--output-format stream-json` would mean a place to stream it *to*.
+- Streaming a spawned agent's full intermediate output (text, tool results).
+  Activity streams one line per step, which is what tells working from stuck;
+  a transcript would need somewhere to keep it.
 
 These are noted so they aren't reinvented ad hoc. Do not build them speculatively.
