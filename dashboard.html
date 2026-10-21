@@ -63,6 +63,8 @@
   .dot { width: .5rem; height: .5rem; border-radius: 999px; background: var(--faint); flex: none; }
   .dot.up { background: var(--green); box-shadow: 0 0 0 3px rgba(124,217,146,.14); }
   .dot.stale { background: var(--red); box-shadow: 0 0 0 3px rgba(240,113,122,.14); }
+  .usage { color: var(--dim); font: .76rem/1 var(--mono); white-space: nowrap; }
+  .usage .hot { color: var(--red); }
   .signout { color: var(--faint); font-size: .8rem; text-decoration: none; }
   .signout:hover { color: var(--red); }
 
@@ -262,6 +264,7 @@
   <div class="brand">gary<span class="dbpath" id="db-path"></span></div>
   <div class="spacer"></div>
   <div class="pulse" id="pulse"></div>
+  <span class="usage" id="usage" title="Claude subscription usage"></span>
   <a class="signout" id="signout" href="logout">sign out</a>
 </header>
 
@@ -699,6 +702,19 @@ async function tick() {
   render();
 }
 
+// Claude subscription usage beside sign out. The hub caches it for a minute, so
+// polling faster than that would only re-read the same numbers.
+async function usageTick() {
+  let u;
+  try { u = await (await fetch("api/usage")).json(); } catch { return; }
+  const win = (label, w) => {
+    if (!w) return "";
+    const left = w.resets_at ? dur(Date.parse(w.resets_at) / 1000 - Date.now() / 1000) : "";
+    return `<span class="${w.percent >= 80 ? "hot" : ""}" title="resets in ${left}">${label} ${Math.round(w.percent)}%</span>`;
+  };
+  paint("usage", u.error ? "" : [win("5h", u.five_hour), win("7d", u.seven_day)].filter(Boolean).join(" · "));
+}
+
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.tab));
 addEventListener("hashchange", () => {
   const want = location.hash.replace("#", "");
@@ -712,6 +728,8 @@ $("compose").addEventListener("keydown", e => {
 setTab(tab);
 tick();
 setInterval(tick, 1000);
+usageTick();
+setInterval(usageTick, 60000);
 // Installable as an app (see pwa/sw.js); harmless where service workers are unavailable.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>

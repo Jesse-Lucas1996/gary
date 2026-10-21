@@ -483,6 +483,7 @@ func registerDashboard(mux *http.ServeMux, s *Store, o serveOpts) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(dashboardHTML)
 	})
+	registerUsage(mux)
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		agents, err := s.List()
 		if err != nil {

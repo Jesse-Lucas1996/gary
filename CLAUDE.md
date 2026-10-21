@@ -421,6 +421,7 @@ server.go      # the hub: HTTP API, auth, long-poll, bind guard
 client.go      # Backend over HTTP, error-code mapping
 node.go        # the runner: claims spawns, supervises claude
 auth.go        # password hashing, session cookies, login rate limit
+usage.go       # Claude subscription usage for the dashboard header
 dashboard.html # embedded live view
 login.html     # embedded sign-in page
 pwa/           # embedded installable-app files: manifest, service worker, icons
