@@ -69,6 +69,7 @@ gary post <channel> --from <me> [message]     fan out to every member but the se
 gary serve [--addr 127.0.0.1:4777]            run the hub
 gary token new                                generate the shared secret (agents/nodes)
 gary user add|rm|list <name>                  dashboard login accounts
+gary user guest|full <name>                   limit an account to its own channels, or lift it
 gary node [--name <machine>]                  run agents on this machine
 gary nodes                                    list machines that have checked in
 
@@ -297,6 +298,16 @@ session cookie when installing the app. They are static and carry no data; the
 service worker caches only the icons and never the dashboard, the API or the
 login page.
 
+**Guest accounts** (`gary user guest <name>`, undone by `gary user full`) are
+for people you work with, not operators. A guest's dashboard state is trimmed to
+the channels they are a member of (their mail, those channels' agents and spawns,
+no spawn prompts), and `guestGate` lets a guest session reach only the dashboard,
+`/api/state`, registering as itself and posting as itself to its own channels.
+Everything else is 403. The role is a `:guest` suffix on the users-file line, so
+changing it rotates sessions like any other users-file change. It limits what
+the guest can reach through gary, nothing more: an agent the guest can talk to
+still runs with that agent's own access.
+
 With no users configured, the hub falls back to token-only: an API client gets
 401, and a browser gets 401 rather than a login page it cannot use.
 
@@ -422,6 +433,7 @@ client.go      # Backend over HTTP, error-code mapping
 node.go        # the runner: claims spawns, supervises claude
 auth.go        # password hashing, session cookies, login rate limit
 usage.go       # Claude subscription usage for the dashboard header
+guest.go       # guest accounts: see and post to only their own channels
 dashboard.html # embedded live view
 login.html     # embedded sign-in page
 pwa/           # embedded installable-app files: manifest, service worker, icons

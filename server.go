@@ -53,7 +53,7 @@ func hubHandler(s *Store, o serveOpts) http.Handler {
 	registerDashboard(mux, s, o)
 	registerLogin(mux, o)
 	registerPWA(mux)
-	return authMiddleware(o, mux)
+	return authMiddleware(o, guestGate(s, o, mux))
 }
 
 func registerLogin(mux *http.ServeMux, o serveOpts) {
@@ -513,15 +513,21 @@ func registerDashboard(mux *http.ServeMux, s *Store, o serveOpts) {
 		// Who the browser posts as. A signed-in account posts under its own name;
 		// a token-only viewer falls back to a shared "dashboard" identity.
 		me := sessionUser(o, r)
+		guest := me != "" && o.users.isGuest(me) && !(o.token != "" && tokenOK(o.token, bearerToken(r)))
 		if me == "" {
 			me = "dashboard"
+		}
+		path := dbPath
+		if guest {
+			channels, msgs, agents, spawns = guestView(me, channels, msgs, agents, spawns)
+			path = ""
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"agents": nilAsEmpty(agents), "messages": nilAsEmpty(msgs),
 			"nodes": nilAsEmpty(nodes), "spawns": nilAsEmpty(spawns),
-			"channels": nilAsEmpty(channels), "me": me,
-			"db_path": dbPath, "api": api, "login": login, "stale_after": int64(3 * heartbeatEvery / time.Second),
+			"channels": nilAsEmpty(channels), "me": me, "guest": guest,
+			"db_path": path, "api": api, "login": login, "stale_after": int64(3 * heartbeatEvery / time.Second),
 		})
 	})
 }

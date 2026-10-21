@@ -112,6 +112,11 @@
   .roomitem.on { background: var(--accent-soft); }
   .roomitem .name { font-weight: 500; }
   .roomitem.on .name { color: var(--accent); }
+  .roomitem .unread {
+    float: right; min-width: 1.3rem; padding: .05rem .4rem; border-radius: 999px;
+    background: var(--red); color: #0a0a0c; font: 600 .72rem/1.3 var(--mono); text-align: center;
+  }
+  .tab .count.hot { color: #0a0a0c; background: var(--red); }
   .roomitem .meta { display: block; color: var(--faint); font-size: .76rem; margin-top: .1rem; }
 
   .room { display: flex; flex-direction: column; min-height: 0; }
@@ -384,6 +389,92 @@ function paint(id, html) {
 
 const LIVE = new Set(["queued", "claimed", "running", "stopping"]);
 
+/* ---------------- unread ---------------- */
+
+// What this browser has read, per room: the highest post id seen there. It is
+// per-device and per-login on purpose — reading on the phone shouldn't clear the
+// laptop, and the hub keeps no read state for people (recv is for agents).
+let lastRead = null;
+function readKey() { return "gary.read." + state.me; }
+function loadRead() {
+  if (lastRead) return;
+  try { lastRead = JSON.parse(localStorage.getItem(readKey())) || {}; } catch { lastRead = {}; }
+  // A room this browser has never opened starts read, so old history isn't a wall of pings.
+  for (const c of state.channels || []) {
+    if (!(c.name in lastRead)) lastRead[c.name] = Math.max(0, ...roomPosts(c.name).map(p => p.id));
+  }
+  saveRead();
+}
+function saveRead() { localStorage.setItem(readKey(), JSON.stringify(lastRead)); }
+
+// Unread = someone else's post that landed after you last looked at the room.
+function unreadIn(channel) {
+  const since = lastRead[channel] ?? 0;
+  return roomPosts(channel).filter(p => p.id > since && p.from !== state.me).length;
+}
+
+function markRead() {
+  if (!room || tab !== "rooms" || document.visibilityState !== "visible") return;
+  const top = Math.max(0, ...roomPosts(room).map(p => p.id));
+  if (top > (lastRead[room] ?? 0)) { lastRead[room] = top; saveRead(); }
+}
+
+// A short two-tone blip, synthesised so there is no audio file to serve.
+let audio = null;
+function blip() {
+  try {
+    audio = audio || new AudioContext();
+    const t = audio.currentTime;
+    [[880, 0], [1320, .09]].forEach(([f, d]) => {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(.0001, t + d);
+      g.gain.exponentialRampToValueAtTime(.18, t + d + .01);
+      g.gain.exponentialRampToValueAtTime(.0001, t + d + .12);
+      o.connect(g).connect(audio.destination);
+      o.start(t + d); o.stop(t + d + .13);
+    });
+  } catch {}
+}
+
+// Browsers only allow sound and notification prompts after the person touches
+// the page, so arm both on the first click.
+addEventListener("pointerdown", () => {
+  if (audio && audio.state === "suspended") audio.resume();
+  else if (!audio) try { audio = new AudioContext(); } catch {}
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+}, {once: true});
+
+let lastUnreadTop = null;
+function ping() {
+  const fresh = [];
+  for (const c of state.channels || []) {
+    const since = lastRead[c.name] ?? 0;
+    for (const p of roomPosts(c.name)) if (p.id > since && p.from !== state.me) fresh.push({...p, channel: c.name});
+  }
+  const total = fresh.length;
+  document.title = total ? `(${total}) gary dashboard` : "gary dashboard";
+  if (navigator.setAppBadge) (total ? navigator.setAppBadge(total) : navigator.clearAppBadge()).catch(() => {});
+  $("c-rooms").textContent = total || (state.channels || []).length;
+  $("c-rooms").classList.toggle("hot", total > 0);
+
+  // Ping only for posts newer than anything already pinged, never on first load.
+  const top = Math.max(0, ...fresh.map(p => p.id));
+  if (lastUnreadTop !== null && top > lastUnreadTop) {
+    const newest = fresh.find(p => p.id === top);
+    blip();
+    if (document.visibilityState !== "visible" && "Notification" in window && Notification.permission === "granted") {
+      const opts = {body: newest.body.slice(0, 200), tag: "gary-" + newest.channel, icon: "icon-192.png"};
+      const title = `${newest.from} in #${newest.channel}`;
+      if (navigator.serviceWorker) navigator.serviceWorker.ready.then(r => r.showNotification(title, opts))
+        .catch(() => new Notification(title, opts));
+      else new Notification(title, opts);
+    }
+  }
+  lastUnreadTop = Math.max(top, lastUnreadTop ?? 0);
+}
+document.addEventListener("visibilitychange", () => { if (state.me) render(); });
+
 /* ---------------- rooms ---------------- */
 
 // A post is one row per member, so collapse the fan-out back into one entry.
@@ -404,14 +495,14 @@ function renderRoomList() {
   if (chans.length && !chans.some(c => c.name === room)) room = chans[0].name;
   if (!chans.length) room = null;
   paint("room-list", chans.length ? chans.map(c => {
-    const n = roomPosts(c.name).length;
+    const n = roomPosts(c.name).length, u = unreadIn(c.name);
     return `<button class="roomitem ${c.name === room ? "on" : ""}" data-room="${esc(c.name)}">
-      <span class="name">#${esc(c.name)}</span>
+      <span class="name">#${esc(c.name)}</span>${u ? `<span class="unread">${u}</span>` : ""}
       <span class="meta">${(c.members || []).length} member${(c.members || []).length === 1 ? "" : "s"} · ${n} post${n === 1 ? "" : "s"}</span>
     </button>`;
   }).join("") : `<div class="empty">no channels yet<br><br><code>gary channel new standup</code></div>`);
   document.querySelectorAll(".roomitem").forEach(el => {
-    el.onclick = () => { room = el.dataset.room; localStorage.setItem("gary.room", room); render(); };
+    el.onclick = () => { room = el.dataset.room; localStorage.setItem("gary.room", room); markRead(); render(); };
   });
 }
 
@@ -428,7 +519,7 @@ function renderRoom() {
   paint("room-head", `
     <div class="top"><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span>
       <span class="spacer"></span>
-      ${state.api ? `<button class="stop clear" id="clear-room">clear room</button>` : ""}</div>
+      ${state.api && !state.guest ? `<button class="stop clear" id="clear-room">clear room</button>` : ""}</div>
     <div class="members">${(chan.members || []).map(m =>
       `<span class="chip sm">${esc(m)}</span>`).join("") || `<span class="hint">nobody has joined yet</span>`}</div>`);
 
@@ -596,7 +687,7 @@ function renderAgents() {
       <td>${s.last_turn_at ? `<span class="lastturn ${s.last_failed ? "failed" : ""}">${
         s.last_failed ? "failed" : "finished"} ${ago(s.last_turn_at)}<br>took ${dur(s.last_turn_secs)}</span>`
         : `<span class="idle-note">none yet</span>`}</td>
-      <td>${state.api ? `<div class="actions">
+      <td>${state.api && !state.guest ? `<div class="actions">
         <button class="stop reset" data-reset="${esc(s.agent)}">reset</button>
         <button class="stop" data-agent="${esc(s.agent)}">stop</button></div>` : ""}</td>
     </tr>`;
@@ -680,7 +771,8 @@ function render() {
   paint("pulse", `<span class="dot ${nodes.length && up ? "up" : "stale"}"></span>
     ${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running.length} agent${running.length === 1 ? "" : "s"}, ${working} working`);
 
-  $("c-rooms").textContent = (state.channels || []).length;
+  loadRead();
+  markRead();
   $("c-inbox").textContent = (state.messages || []).filter(m => m.status === "pending").length;
   $("c-agents").textContent = (state.agents || []).length;
 
@@ -688,6 +780,7 @@ function render() {
   renderRoom();
   renderInbox();
   renderAgents();
+  ping();
   firstPaint = false;
 }
 

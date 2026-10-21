@@ -2,7 +2,7 @@
 // readable page when the hub can't be reached. It never caches the dashboard,
 // the API or the login page: those are live and behind a session, and a stale
 // copy would show agents as working long after they stopped.
-const CACHE = "gary-shell-v1";
+const CACHE = "gary-shell-v2";
 const SHELL = ["icon-192.png", "icon-512.png"];
 
 const OFFLINE = `<!doctype html><html><head><meta charset="utf-8">
@@ -35,4 +35,12 @@ self.addEventListener("fetch", e => {
   if (SHELL.some(p => new URL(req.url).pathname.endsWith("/" + p))) {
     e.respondWith(caches.match(req).then(hit => hit || fetch(req)));
   }
+});
+
+// A ping notification: tapping it brings the dashboard back instead of opening a
+// second copy.
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({type: "window"}).then(list =>
+    list.length ? list[0].focus() : self.clients.openWindow(self.registration.scope)));
 });

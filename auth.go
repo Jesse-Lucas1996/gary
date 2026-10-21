@@ -33,6 +33,7 @@ type credential struct {
 	iters int
 	salt  []byte
 	hash  []byte
+	guest bool // sees only the channels they are a member of; see guestGate
 }
 
 type userStore struct {
@@ -77,7 +78,12 @@ func loadUsers(path string) (*userStore, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s line %d: expected name:hash", path, n+1)
 		}
+		enc, role, _ := strings.Cut(enc, ":")
 		c, err := parseCredential(enc)
+		if err == nil && role != "" && role != "guest" {
+			err = fmt.Errorf("unknown role %q", role)
+		}
+		c.guest = role == "guest"
 		if err != nil {
 			return nil, fmt.Errorf("%s line %d: %w", path, n+1, err)
 		}
@@ -147,9 +153,30 @@ func (s *userStore) set(name, password string) error {
 		return err
 	}
 	s.mu.Lock()
-	s.users[name] = credential{iters: pbkdf2Iters, salt: salt, hash: hash}
+	s.users[name] = credential{iters: pbkdf2Iters, salt: salt, hash: hash, guest: s.users[name].guest}
 	s.mu.Unlock()
 	return s.save()
+}
+
+// setGuest marks an existing account as a guest (or back to full access).
+func (s *userStore) setGuest(name string, guest bool) error {
+	s.mu.Lock()
+	c, ok := s.users[name]
+	if ok {
+		c.guest = guest
+		s.users[name] = c
+	}
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no such user %q", name)
+	}
+	return s.save()
+}
+
+func (s *userStore) isGuest(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.users[name].guest
 }
 
 func (s *userStore) remove(name string) error {
@@ -189,7 +216,11 @@ func (s *userStore) save() error {
 		s.mu.RLock()
 		c := s.users[n]
 		s.mu.RUnlock()
-		fmt.Fprintf(&b, "%s:%s\n", n, encodeCredential(c))
+		role := ""
+		if c.guest {
+			role = ":guest"
+		}
+		fmt.Fprintf(&b, "%s:%s%s\n", n, encodeCredential(c), role)
 	}
 	raw := []byte(b.String())
 	tmp := s.path + ".tmp"
