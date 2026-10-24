@@ -442,3 +442,8 @@ audio through faster-whisper locally. It runs `transcribe.py` from the venv in `
 (default `~/opt/gary-transcribe`, with `yt-dlp` and `faster-whisper` installed) and caches per video
 in `~/.cache/gary-transcripts/`.
 
+`gary video <youtube url> [--from mm:ss] [--to mm:ss] [--every N]` lets an agent look at a video:
+frames at scene changes and every few seconds, tiled into time-stamped 3x3 contact sheets, with a
+`[mm:ss]` transcript beside them (`watch.py`, same venv plus Pillow), cached in
+`~/.cache/gary-watch/`.
+

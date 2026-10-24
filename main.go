@@ -46,6 +46,7 @@ Messaging:
   gary send|post ... --attach <picture>         attach a PNG/JPEG/GIF/WebP (repeatable)
   gary file get <id> [-o <path>]                save an attached picture, print its path
   gary transcribe <youtube url>                 print the video's transcript (captions, else local speech-to-text)
+  gary video <youtube url> [--from --to]        frames as time-stamped contact sheets + transcript, to look at
 
 Channels (one message, every member):
   gary channel new <name> [--description <t>]   create or update a shared channel
@@ -282,10 +283,15 @@ func run(args []string) error {
 			return tw.Flush()
 		})
 
-	case "transcribe":
-		// YouTube transcripts for agents: the venv at $GARY_TRANSCRIBE (default ~/opt/gary-transcribe)
-		// holds yt-dlp, faster-whisper and transcribe.py; captions first, local speech-to-text if none.
+	case "transcribe", "video":
+		// YouTube for agents, from the venv at $GARY_TRANSCRIBE (default ~/opt/gary-transcribe: yt-dlp,
+		// faster-whisper, Pillow): transcribe prints the transcript; video downloads it, takes frames at
+		// scene changes and every few seconds, tiles them into time-stamped contact sheets for the
+		// agent to look at, and writes a [mm:ss] transcript beside them.
 		if len(rest) == 0 {
+			if cmd == "video" {
+				return fmt.Errorf("usage: gary video <youtube url> [--from mm:ss] [--to mm:ss] [--every 10] [--force]")
+			}
 			return fmt.Errorf("usage: gary transcribe <youtube url> [--model small] [--whisper] [--force]")
 		}
 		dir := os.Getenv("GARY_TRANSCRIBE")
@@ -293,13 +299,14 @@ func run(args []string) error {
 			home, _ := os.UserHomeDir()
 			dir = filepath.Join(home, "opt", "gary-transcribe")
 		}
-		py, script := filepath.Join(dir, "bin", "python"), filepath.Join(dir, "transcribe.py")
+		name := map[string]string{"transcribe": "transcribe.py", "video": "watch.py"}[cmd]
+		py, script := filepath.Join(dir, "bin", "python"), filepath.Join(dir, name)
 		if _, err := os.Stat(script); err != nil {
-			return fmt.Errorf("transcribe isn't set up on this machine (%s missing); see the gary skill", script)
+			return fmt.Errorf("%s isn't set up on this machine (%s missing); see the gary README", cmd, script)
 		}
-		cmd := exec.Command(py, append([]string{script}, rest...)...)
-		cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
-		return cmd.Run()
+		c := exec.Command(py, append([]string{script}, rest...)...)
+		c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
+		return c.Run()
 
 	case "file":
 		out := fs.String("o", "", "where to save it (default /tmp/gary-files/<id>.<ext>)")
