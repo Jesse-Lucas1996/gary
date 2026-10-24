@@ -40,7 +40,7 @@ func guestGate(s *Store, o serveOpts, next http.Handler) http.Handler {
 			return
 		}
 		switch r.URL.Path {
-		case "/", "/login", "/logout", "/api/state":
+		case "/", "/login", "/logout", "/api/state", "/api/usage": // usage: the hub owner's Claude subscription meter, shared on purpose
 			next.ServeHTTP(w, r)
 			return
 		case "/v1/register", "/v1/post":

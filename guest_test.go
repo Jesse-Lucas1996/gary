@@ -145,7 +145,7 @@ func TestGuestAPIIsLimitedToPostingAsThemselves(t *testing.T) {
 		{"/v1/channels/join", `{"Channel":"ops","Agent":"nick"}`, 403},
 		{"/v1/spawn", `{"agent":"x","node":"server","repo":"/"}`, 403},
 		{"/v1/recent", ``, 403},
-		{"/api/usage", ``, 403},
+		{"/api/usage", ``, 200}, // guests see the header's usage meter (Jesse, 2026-10-24)
 	} {
 		if got := call(c.path, c.body); got != c.want {
 			t.Errorf("%s %s: got %d, want %d", c.path, c.body, got, c.want)
