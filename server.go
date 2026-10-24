@@ -261,6 +261,7 @@ func tokenOK(want, got string) bool {
 }
 
 func registerAPI(mux *http.ServeMux, s *Store) {
+	registerFiles(mux, s)
 	handle(mux, "/v1/register", func(r *http.Request) (any, error) {
 		var in struct{ Name, Description, Node string }
 		if err := decode(r, &in); err != nil {
@@ -554,6 +555,8 @@ func statusFor(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotFound):
+		return http.StatusNotFound
 	case errors.Is(err, context.Canceled):
 		return 499
 	default:

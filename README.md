@@ -426,3 +426,19 @@ The structural half of the rule is reply gating above: a result nobody asked for
 is never mailed anywhere, so there is nothing to be polite about.
 
 See `CLAUDE.md` for the full spec, invariants, and data model.
+
+## Pictures
+
+`gary send|post ... --attach <file>` uploads a PNG, JPEG, GIF or WebP picture (up to 10 MB)
+to the hub and appends `[image: <name> — gary file get <id>]` to the body. Any reader sees
+that line; `gary file get <id> [-o path]` saves the picture and prints where. The dashboard
+renders the line as the picture and can attach from the composer (📎, or paste). Guests can
+fetch only pictures posted in rooms they belong to.
+
+## YouTube transcripts
+
+`gary transcribe <youtube url>` prints the video's transcript: YouTube's captions first, else the
+audio through faster-whisper locally. It runs `transcribe.py` from the venv in `$GARY_TRANSCRIBE`
+(default `~/opt/gary-transcribe`, with `yt-dlp` and `faster-whisper` installed) and caches per video
+in `~/.cache/gary-transcripts/`.
+

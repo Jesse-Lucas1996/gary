@@ -162,6 +162,26 @@
   }
   .send:hover:not(:disabled) { filter: brightness(1.1); }
   .send:disabled { opacity: .4; cursor: not-allowed; }
+  .attach-btn {
+    background: none; border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+    padding: .35rem .6rem; font-size: 1rem; line-height: 1;
+  }
+  .attach-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .attach-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .foot .right { display: flex; gap: .5rem; align-items: center; }
+  .pending { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+  .pending:empty { display: none; }
+  .pending .thumb { position: relative; }
+  .pending img { height: 64px; width: auto; border-radius: 6px; border: 1px solid var(--line); display: block; }
+  .pending button {
+    position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
+    border: 0; background: var(--red); color: #fff; cursor: pointer; font-size: .7rem; line-height: 20px; padding: 0;
+  }
+  img.att {
+    display: block; max-width: min(100%, 420px); max-height: 360px; margin: .35rem 0;
+    border-radius: 8px; border: 1px solid var(--line-soft); cursor: zoom-in;
+  }
+  td.body img.att { max-width: 160px; max-height: 120px; }
 
   /* ---------- chips ---------- */
   .chips { display: flex; gap: .5rem; flex-wrap: wrap; }
@@ -291,9 +311,14 @@
         <div class="transcript" id="transcript"></div>
         <form class="composer" id="composer">
           <textarea id="compose" rows="2" placeholder="Write to the channel…"></textarea>
+          <div class="pending" id="compose-pending"></div>
           <div class="foot">
             <span class="hint" id="compose-hint"></span>
-            <button type="submit" class="send" id="compose-send">Post</button>
+            <span class="right">
+              <input type="file" id="compose-file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+              <button type="button" class="attach-btn" id="compose-attach" title="Attach a picture">📎</button>
+              <button type="submit" class="send" id="compose-send">Post</button>
+            </span>
           </div>
         </form>
       </div>
@@ -365,6 +390,14 @@ function ago(unixSeconds) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// A message body with its picture markers ("[image: name — gary file get <id>]",
+// see files.go) shown as the pictures themselves. Escapes first, so only the
+// marker's own shape can become markup.
+function rich(s) {
+  return esc(s).replace(/\[image: ([^\]\n]*?) — gary file get ([0-9a-f]{32})\]/g,
+    (_, name, id) => `<a href="v1/files/${id}" target="_blank" rel="noopener"><img class="att" src="v1/files/${id}" alt="${name}" title="${name}" loading="lazy"></a>`);
 }
 
 // Stable per-name colour so an agent looks the same everywhere.
@@ -540,7 +573,7 @@ function renderRoom() {
           <span class="when">${ago(p.created_at)}</span>
           <span class="fan">→ ${p.to.length} agent${p.to.length === 1 ? "" : "s"}</span>
         </div>
-        <div class="bubble">${esc(p.body)}</div>
+        <div class="bubble">${rich(p.body)}</div>
       </div>
     </div>`;
   }).join("") : `<div class="empty">nothing posted to #${esc(chan.name)} yet</div>`);
@@ -551,7 +584,7 @@ function renderRoom() {
 function setComposer(chan) {
   const box = $("compose"), send = $("compose-send"), hint = $("compose-hint");
   const ok = !!chan && state.api;
-  box.disabled = send.disabled = !ok;
+  box.disabled = send.disabled = $("compose-attach").disabled = !ok;
   box.placeholder = chan ? `Message #${chan.name}…` : "";
   if (hint.classList.contains("bad")) return;   // leave an error up until the next send
   hint.textContent = "";
@@ -586,14 +619,60 @@ async function post(channel, body) {
   if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || "post failed");
 }
 
+// Pictures waiting to go with the next post: [{blob, name, url}].
+let pending = [];
+function renderPending() {
+  $("compose-pending").innerHTML = pending.map((p, i) =>
+    `<span class="thumb"><img src="${p.url}" alt="${esc(p.name)}"><button type="button" data-drop="${i}" title="Remove">✕</button></span>`).join("");
+}
+
+// Phone photos run to many megabytes; send them at most 2048 px on the long side.
+async function shrink(file) {
+  if (file.type === "image/gif" || file.size < 1.5e6) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, 2048 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.85));
+    return blob || file;
+  } catch { return file; }
+}
+
+async function addFiles(files) {
+  for (const f of files) {
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(f.type)) continue;
+    const blob = await shrink(f);
+    const name = blob === f ? f.name : f.name.replace(/\.[^.]*$/, "") + ".jpg";
+    pending.push({blob, name: name || "picture", url: URL.createObjectURL(blob)});
+  }
+  renderPending();
+}
+
+async function upload(p) {
+  const resp = await fetch("v1/files?name=" + encodeURIComponent(p.name), {method: "POST", body: p.blob});
+  const out = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(out.error || "upload failed");
+  return `[image: ${out.name.replace(/[\]\n]/g, " ")} — gary file get ${out.id}]`;
+}
+
 async function submit(e) {
   e.preventDefault();
   const box = $("compose"), hint = $("compose-hint");
-  const body = box.value.trim();
-  if (!body || !room) return;
+  let body = box.value.trim();
+  if ((!body && !pending.length) || !room) return;
   box.disabled = $("compose-send").disabled = true;
   try {
+    if (pending.length) {
+      const markers = [];
+      for (const p of pending) markers.push(await upload(p));
+      body = [body, ...markers].filter(Boolean).join("\n");
+    }
     await post(room, body);
+    pending.forEach(p => URL.revokeObjectURL(p.url));
+    pending = [];
+    renderPending();
     box.value = "";
     hint.classList.remove("bad");
     hint.textContent = "";
@@ -638,7 +717,7 @@ function renderInbox() {
       <td>${esc(m.to)}${m.channel ? ` <span class="tag">#${esc(m.channel)}</span>` : ""}</td>
       <td><span class="status ${m.status}">${m.status}</span>${m.expects_reply ? ` <span class="tag">wants reply</span>` : ""}</td>
       <td>${ago(m.created_at)}</td>
-      <td class="body">${esc(m.body)}</td>
+      <td class="body">${rich(m.body)}</td>
     </tr>`;
   }).join(""));
 }
@@ -814,6 +893,19 @@ addEventListener("hashchange", () => {
   if (TABS.includes(want) && want !== tab) setTab(want);
 });
 $("composer").onsubmit = submit;
+$("compose-attach").onclick = () => $("compose-file").click();
+$("compose-file").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
+$("compose-pending").onclick = e => {
+  const i = e.target.dataset.drop;
+  if (i === undefined) return;
+  URL.revokeObjectURL(pending[i].url);
+  pending.splice(Number(i), 1);
+  renderPending();
+};
+$("compose").addEventListener("paste", e => {
+  const imgs = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+  if (imgs.length) { e.preventDefault(); addFiles(imgs); }
+});
 $("compose").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(e); }
 });

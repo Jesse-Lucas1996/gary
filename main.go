@@ -43,6 +43,9 @@ Messaging:
   gary inbox <name>                             peek pending messages (no dequeue)
   gary recv <name>                              dequeue oldest pending, auto-ack
   gary watch <name> [--interval 1s]             block, printing messages as they arrive
+  gary send|post ... --attach <picture>         attach a PNG/JPEG/GIF/WebP (repeatable)
+  gary file get <id> [-o <path>]                save an attached picture, print its path
+  gary transcribe <youtube url>                 print the video's transcript (captions, else local speech-to-text)
 
 Channels (one message, every member):
   gary channel new <name> [--description <t>]   create or update a shared channel
@@ -140,18 +143,20 @@ func run(args []string) error {
 		from := fs.String("from", "", "sending agent (required)")
 		expectReply := fs.Bool("expect-reply", false,
 			"have the recipient's result sent back to you as a new message")
+		var attach multiFlag
+		fs.Var(&attach, "attach", "picture to attach (PNG/JPEG/GIF/WebP); repeatable")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: gary send <to> --from <me> [--expect-reply] [message]")
+			return fmt.Errorf("usage: gary send <to> --from <me> [--expect-reply] [--attach <picture>] [message]")
 		}
 		if *from == "" {
 			return fmt.Errorf("--from is required")
 		}
 		to := fs.Arg(0)
 		body := strings.Join(fs.Args()[1:], " ")
-		if body == "" {
+		if body == "" && len(attach) == 0 {
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
 				return err
@@ -159,6 +164,10 @@ func run(args []string) error {
 			body = string(b)
 		}
 		return c.with(func(bk Backend) error {
+			body, err := attachAll(bk, body, attach)
+			if err != nil {
+				return err
+			}
 			id, err := bk.Send(*from, to, body, *expectReply)
 			if err != nil {
 				return err
@@ -273,20 +282,61 @@ func run(args []string) error {
 			return tw.Flush()
 		})
 
+	case "transcribe":
+		// YouTube transcripts for agents: the venv at $GARY_TRANSCRIBE (default ~/opt/gary-transcribe)
+		// holds yt-dlp, faster-whisper and transcribe.py; captions first, local speech-to-text if none.
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: gary transcribe <youtube url> [--model small] [--whisper] [--force]")
+		}
+		dir := os.Getenv("GARY_TRANSCRIBE")
+		if dir == "" {
+			home, _ := os.UserHomeDir()
+			dir = filepath.Join(home, "opt", "gary-transcribe")
+		}
+		py, script := filepath.Join(dir, "bin", "python"), filepath.Join(dir, "transcribe.py")
+		if _, err := os.Stat(script); err != nil {
+			return fmt.Errorf("transcribe isn't set up on this machine (%s missing); see the gary skill", script)
+		}
+		cmd := exec.Command(py, append([]string{script}, rest...)...)
+		cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+		return cmd.Run()
+
+	case "file":
+		out := fs.String("o", "", "where to save it (default /tmp/gary-files/<id>.<ext>)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() != 2 || fs.Arg(0) != "get" {
+			return fmt.Errorf("usage: gary file get <id> [-o <path>]")
+		}
+		return c.with(func(b Backend) error {
+			p, err := fileGet(b, fs.Arg(1), *out)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return writeJSON(map[string]string{"id": fs.Arg(1), "path": p})
+			}
+			fmt.Println(p)
+			return nil
+		})
+
 	case "post":
 		from := fs.String("from", "", "posting agent (required)")
+		var attach multiFlag
+		fs.Var(&attach, "attach", "picture to attach (PNG/JPEG/GIF/WebP); repeatable")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: gary post <channel> --from <me> [message]")
+			return fmt.Errorf("usage: gary post <channel> --from <me> [--attach <picture>] [message]")
 		}
 		if *from == "" {
 			return fmt.Errorf("--from is required")
 		}
 		channel := fs.Arg(0)
 		body := strings.Join(fs.Args()[1:], " ")
-		if body == "" {
+		if body == "" && len(attach) == 0 {
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
 				return err
@@ -294,6 +344,10 @@ func run(args []string) error {
 			body = string(b)
 		}
 		return c.with(func(b Backend) error {
+			body, err := attachAll(b, body, attach)
+			if err != nil {
+				return err
+			}
 			ids, err := b.Post(*from, channel, body)
 			if err != nil {
 				return err

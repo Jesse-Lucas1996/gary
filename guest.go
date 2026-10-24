@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Guest accounts: a dashboard login that sees only the channels it is a member
@@ -24,6 +25,18 @@ func guestGate(s *Store, o serveOpts, next http.Handler) http.Handler {
 		}
 		if _, static := pwaFiles[r.URL.Path]; static {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/v1/files" && r.Method == http.MethodPost {
+			next.ServeHTTP(w, r) // uploading only stores bytes; a guest can still post only to its rooms
+			return
+		}
+		if id, isFile := strings.CutPrefix(r.URL.Path, "/v1/files/"); isFile && r.Method == http.MethodGet {
+			if guestMaySee(s, user, id) {
+				next.ServeHTTP(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
 			return
 		}
 		switch r.URL.Path {

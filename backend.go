@@ -26,6 +26,8 @@ type Backend interface {
 	LeaveChannel(channel, agent string) error
 	Channels() ([]Channel, error)
 	Post(from, channel, body string) ([]int64, error)
+	PutFile(name string, data []byte) (FileRef, error)
+	GetFile(id string) (FileRef, []byte, error)
 
 	Heartbeat(name, version string) error
 	Nodes() ([]Node, error)

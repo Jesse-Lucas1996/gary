@@ -201,6 +201,9 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if _, err := db.Exec(filesSchema); err != nil {
+		return nil, fmt.Errorf("files schema: %w", err)
+	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
