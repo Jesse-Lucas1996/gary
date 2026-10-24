@@ -371,8 +371,9 @@ func run(args []string) error {
 		fs.StringVar(&spec.Prompt, "prompt", "", "extra system prompt for the agent")
 		fs.StringVar(&spec.Model, "model", "", "model alias (opus, sonnet, ...)")
 		fs.StringVar(&spec.PermissionMode, "permission-mode", "acceptEdits", "claude permission mode")
+		fs.StringVar(&spec.Runtime, "runtime", "claude", "agent CLI to run: claude or codex")
 		fs.BoolVar(&spec.Force, "force", false, "skip node/name checks")
-		yolo := fs.Bool("yolo", false, "run with --dangerously-skip-permissions")
+		yolo := fs.Bool("yolo", false, "run with no permission checks (codex: no sandbox either)")
 		agent, err := parse1(fs, rest, "spawn <agent> --node <machine> --repo <path>")
 		if err != nil {
 			return err

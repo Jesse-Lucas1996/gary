@@ -118,7 +118,7 @@ func (r *runner) heartbeatLoop(ctx context.Context) {
 }
 
 func (r *runner) supervise(ctx context.Context, sp *Spawn) {
-	desc := fmt.Sprintf("claude agent in %s", sp.Repo)
+	desc := fmt.Sprintf("%s agent in %s", runtimeOf(sp), sp.Repo)
 	if err := r.b.RegisterOn(sp.Agent, desc, r.node); err != nil {
 		r.fail(sp, fmt.Errorf("register: %w", err))
 		return
@@ -165,7 +165,7 @@ func (r *runner) supervise(ctx context.Context, sp *Spawn) {
 			live.Step, live.StepAt = what, time.Now().Unix()
 			r.report(sp, live)
 		}
-		step("starting claude")
+		step("starting " + runtimeOf(sp))
 		out, newSession, err := r.turn(ctx, sp, session, m, step)
 		if err != nil && ctx.Err() != nil {
 			return
@@ -225,6 +225,9 @@ func (r *runner) report(sp *Spawn, a Activity) {
 // tool call as it starts and can hand it to step; that is the only way to tell
 // a long turn that is working from one blocked on a single command.
 func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message, step func(string)) (string, string, error) {
+	if runtimeOf(sp) == "codex" {
+		return r.codexTurn(ctx, sp, session, m, step)
+	}
 	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", sp.PermissionMode}
 	if session == "" {
 		args = append(args, "--session-id", newSessionID())
@@ -263,6 +266,124 @@ func (r *runner) turn(ctx context.Context, sp *Spawn, session string, m *Message
 		return "", res.SessionID, fmt.Errorf("claude reported an error (%s): %s", res.Subtype, res.Result)
 	}
 	return res.Result, res.SessionID, nil
+}
+
+func runtimeOf(sp *Spawn) string {
+	if sp.Runtime == "" {
+		return "claude"
+	}
+	return sp.Runtime
+}
+
+// codexTurn is turn for a codex agent: `codex exec --json`, resumed by thread id.
+// codex has no appended system prompt, so a fresh session gets gary's framing as
+// the head of its first message and keeps it in the thread from then on.
+func (r *runner) codexTurn(ctx context.Context, sp *Spawn, session string, m *Message, step func(string)) (string, string, error) {
+	args := []string{"exec"}
+	if session != "" {
+		args = append(args, "resume", session)
+	}
+	args = append(args, "--json", "--skip-git-repo-check")
+	if sp.PermissionMode == "bypassPermissions" {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else if session == "" {
+		args = append(args, "--sandbox", "workspace-write") // resume takes no --sandbox; the thread keeps it
+	}
+	if sp.Model != "" {
+		args = append(args, "--model", sp.Model)
+	}
+	args = append(args, "-")
+
+	prompt := inbound(m)
+	if session == "" {
+		prompt = systemPrompt(sp) + "\n---\n\n" + prompt
+	}
+	if r.turnLimit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.turnLimit)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Dir = sp.Repo
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", "", fmt.Errorf("codex: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", "", fmt.Errorf("codex: %w", err)
+	}
+	res := readCodexStream(stdout, step)
+	if err := cmd.Wait(); err != nil {
+		if res.err != "" {
+			return "", res.thread, fmt.Errorf("codex: %s", res.err)
+		}
+		return "", res.thread, fmt.Errorf("codex: %w", err)
+	}
+	if res.err != "" {
+		return "", res.thread, fmt.Errorf("codex reported an error: %s", res.err)
+	}
+	if !res.done {
+		return "", res.thread, fmt.Errorf("codex exited without finishing the turn")
+	}
+	return res.last, res.thread, nil
+}
+
+type codexResult struct {
+	thread, last, err string
+	done              bool
+}
+
+// readCodexStream is readStream for codex's JSONL events. The turn's result is
+// its last agent_message; earlier ones are narration and become steps.
+func readCodexStream(rd io.Reader, step func(string)) codexResult {
+	var res codexResult
+	br := bufio.NewReader(rd)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			var ev struct {
+				Type     string `json:"type"`
+				ThreadID string `json:"thread_id"`
+				Message  string `json:"message"`
+				Error    struct {
+					Message string `json:"message"`
+				} `json:"error"`
+				Item struct {
+					Type    string `json:"type"`
+					Text    string `json:"text"`
+					Command string `json:"command"`
+				} `json:"item"`
+			}
+			if json.Unmarshal(line, &ev) == nil {
+				switch ev.Type {
+				case "thread.started":
+					res.thread = ev.ThreadID
+				case "turn.completed":
+					res.done = true
+				case "turn.failed":
+					res.err = ev.Error.Message
+				case "error":
+					res.err = ev.Message
+				case "item.started":
+					if ev.Item.Type == "command_execution" {
+						step(clip("Bash: "+strings.Join(strings.Fields(ev.Item.Command), " "), maxStep))
+					} else if ev.Item.Type != "" {
+						step(ev.Item.Type)
+					}
+				case "item.completed":
+					if ev.Item.Type == "agent_message" {
+						res.last = ev.Item.Text
+						step("writing")
+					}
+				}
+			}
+		}
+		if err != nil {
+			return res
+		}
+	}
 }
 
 type streamResult struct {

@@ -39,6 +39,7 @@ type SpawnSpec struct {
 	Prompt         string `json:"prompt,omitempty"`
 	Model          string `json:"model,omitempty"`
 	PermissionMode string `json:"permission_mode,omitempty"`
+	Runtime        string `json:"runtime,omitempty"` // claude (default) or codex
 	Force          bool   `json:"force,omitempty"`
 }
 
@@ -50,6 +51,7 @@ type Spawn struct {
 	Prompt         string `json:"prompt"`
 	Model          string `json:"model"`
 	PermissionMode string `json:"permission_mode"`
+	Runtime        string `json:"runtime"`
 	Status         string `json:"status"`
 	SessionID      string `json:"session_id,omitempty"`
 	PID            int    `json:"pid,omitempty"`
@@ -215,6 +217,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(db, "messages", "expects_reply", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "spawns", "runtime", "TEXT NOT NULL DEFAULT 'claude'"); err != nil {
 		return err
 	}
 	for _, c := range activityColumns {
@@ -782,11 +787,18 @@ func (s *Store) Spawn(spec SpawnSpec) (int64, error) {
 	if mode == "" {
 		mode = "acceptEdits"
 	}
+	rt := spec.Runtime
+	if rt == "" {
+		rt = "claude"
+	}
+	if rt != "claude" && rt != "codex" {
+		return 0, fmt.Errorf("unknown runtime %q (want claude or codex)", rt)
+	}
 	now := time.Now().Unix()
 	res, err := s.db.Exec(`
-		INSERT INTO spawns(agent, node, repo, prompt, model, permission_mode, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?)`,
-		spec.Agent, spec.Node, spec.Repo, spec.Prompt, spec.Model, mode, now, now)
+		INSERT INTO spawns(agent, node, repo, prompt, model, permission_mode, runtime, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		spec.Agent, spec.Node, spec.Repo, spec.Prompt, spec.Model, mode, rt, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("spawn: %w", err)
 	}
@@ -802,9 +814,9 @@ func (s *Store) ClaimSpawn(node string) (*Spawn, error) {
 
 	var sp Spawn
 	err = tx.QueryRow(`
-		SELECT id, agent, node, repo, prompt, model, permission_mode, COALESCE(session_id,''), created_at
+		SELECT id, agent, node, repo, prompt, model, permission_mode, runtime, COALESCE(session_id,''), created_at
 		FROM spawns WHERE node=? AND status='queued' ORDER BY id LIMIT 1`, node).
-		Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model, &sp.PermissionMode, &sp.SessionID, &sp.CreatedAt)
+		Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model, &sp.PermissionMode, &sp.Runtime, &sp.SessionID, &sp.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -915,7 +927,7 @@ func (s *Store) StopSpawn(agent string) error {
 
 func (s *Store) Spawns(limit int) ([]Spawn, error) {
 	rows, err := s.db.Query(`
-		SELECT id, agent, node, repo, prompt, model, permission_mode, status,
+		SELECT id, agent, node, repo, prompt, model, permission_mode, runtime, status,
 		       COALESCE(session_id,''), COALESCE(pid,0), COALESCE(error,''), created_at, updated_at,
 		       turn_msg, turn_from, turn_started, step, step_at,
 		       last_turn_at, last_turn_secs, last_result, last_failed, reset_pending
@@ -928,7 +940,7 @@ func (s *Store) Spawns(limit int) ([]Spawn, error) {
 	for rows.Next() {
 		var sp Spawn
 		if err := rows.Scan(&sp.ID, &sp.Agent, &sp.Node, &sp.Repo, &sp.Prompt, &sp.Model,
-			&sp.PermissionMode, &sp.Status, &sp.SessionID, &sp.PID, &sp.Error, &sp.CreatedAt, &sp.UpdatedAt,
+			&sp.PermissionMode, &sp.Runtime, &sp.Status, &sp.SessionID, &sp.PID, &sp.Error, &sp.CreatedAt, &sp.UpdatedAt,
 			&sp.TurnMsg, &sp.TurnFrom, &sp.TurnStarted, &sp.Step, &sp.StepAt,
 			&sp.LastTurnAt, &sp.LastTurnSecs, &sp.LastResult, &sp.LastFailed, &sp.ResetPending); err != nil {
 			return nil, err

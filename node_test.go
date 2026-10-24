@@ -376,6 +376,50 @@ func TestReadStreamWithoutResult(t *testing.T) {
 	}
 }
 
+func TestReadCodexStream(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'll run that."}}`,
+		`{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls'","status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls'","exit_code":0}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"pong"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1}}`,
+	}, "\n")
+	var steps []string
+	res := readCodexStream(strings.NewReader(stream), func(s string) { steps = append(steps, s) })
+	if !res.done || res.err != "" || res.last != "pong" || res.thread != "t1" {
+		t.Fatalf("result: %+v", res)
+	}
+	want := []string{"writing", "Bash: /bin/bash -lc 'ls'", "writing"}
+	if strings.Join(steps, "|") != strings.Join(want, "|") {
+		t.Fatalf("steps:\n got %q\nwant %q", steps, want)
+	}
+
+	failed := readCodexStream(strings.NewReader(`{"type":"thread.started","thread_id":"t2"}
+{"type":"turn.failed","error":{"message":"429 Too Many Requests"}}`), func(string) {})
+	if failed.done || failed.err != "429 Too Many Requests" || failed.thread != "t2" {
+		t.Fatalf("failed turn: %+v", failed)
+	}
+}
+
+func TestSpawnRuntime(t *testing.T) {
+	s := testStore(t)
+	if err := s.Heartbeat("n1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Spawn(SpawnSpec{Agent: "a", Node: "n1", Repo: "/tmp", Runtime: "gemini"}); err == nil {
+		t.Fatal("an unknown runtime must be refused")
+	}
+	if _, err := s.Spawn(SpawnSpec{Agent: "a", Node: "n1", Repo: "/tmp", Runtime: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := s.ClaimSpawn("n1")
+	if err != nil || sp == nil || sp.Runtime != "codex" {
+		t.Fatalf("claimed %+v, %v", sp, err)
+	}
+}
+
 func TestSetActivityKeepsLastTurnWhenGoingIdle(t *testing.T) {
 	s := testStore(t)
 	if err := s.Heartbeat("n1", "test"); err != nil {
