@@ -40,7 +40,20 @@ type userStore struct {
 	path  string
 	mu    sync.RWMutex
 	users map[string]credential
-	raw   []byte
+	stamp fileStamp // the file as last read or written, so refresh can spot an outside edit
+}
+
+type fileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+func stampOf(path string) fileStamp {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}
+	}
+	return fileStamp{info.ModTime(), info.Size()}
 }
 
 func UsersPath() (string, error) {
@@ -68,7 +81,7 @@ func loadUsers(path string) (*userStore, error) {
 		fmt.Fprintf(os.Stderr, "gary: warning: %s is mode %04o; run `chmod 600 %s`\n",
 			path, info.Mode().Perm(), path)
 	}
-	s.raw = raw
+	s.stamp = stampOf(path)
 	for n, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -90,6 +103,33 @@ func loadUsers(path string) (*userStore, error) {
 		s.users[name] = c
 	}
 	return s, nil
+}
+
+// refresh rereads the file when something else changed it — `gary user` on the
+// same machine — so the hub picks the change up without a restart. A file that
+// fails to parse keeps the accounts already loaded rather than locking everyone out.
+func (s *userStore) refresh() {
+	if s.path == "" {
+		return
+	}
+	now := stampOf(s.path)
+	s.mu.RLock()
+	same := now == s.stamp
+	s.mu.RUnlock()
+	if same {
+		return
+	}
+	fresh, err := loadUsers(s.path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gary: users file changed but did not load, keeping the old one: %v\n", err)
+		s.mu.Lock()
+		s.stamp = now
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Lock()
+	s.users, s.stamp = fresh.users, fresh.stamp
+	s.mu.Unlock()
 }
 
 func parseCredential(enc string) (credential, error) {
@@ -173,6 +213,37 @@ func (s *userStore) setGuest(name string, guest bool) error {
 	return s.save()
 }
 
+// setWithRole sets the password and, unless role is "", the role, in one save.
+func (s *userStore) setWithRole(name, password, role string) error {
+	if err := s.set(name, password); err != nil {
+		return err
+	}
+	if role == "" {
+		return nil
+	}
+	return s.setGuest(name, role == "guest")
+}
+
+func (s *userStore) exists(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.users[name]
+	return ok
+}
+
+// role is how the dashboard names an account's access: admin (everything) or
+// guest (only its own rooms). On disk a guest is a ":guest" suffix.
+func (s *userStore) role(name string) string {
+	if s.isGuest(name) {
+		return "guest"
+	}
+	return "admin"
+}
+
+// randomPassword is what onboarding hands a new person: 26 base32 characters,
+// 128 bits from crypto/rand.
+func randomPassword() string { return rand.Text() }
+
 func (s *userStore) isGuest(name string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -230,16 +301,41 @@ func (s *userStore) save() error {
 	if err := os.Rename(tmp, s.path); err != nil {
 		return err
 	}
-	s.raw = raw
+	s.mu.Lock()
+	s.stamp = stampOf(s.path)
+	s.mu.Unlock()
 	return nil
 }
 
-func (s *userStore) sessionKey(token string) []byte {
+// sessionKey signs one account's sessions. It covers the token and that
+// account's own password hash, so rotating the token signs everyone out while
+// changing one password (or removing the account) signs out only that person.
+// The role is left out on purpose: it is checked on every request, so a role
+// change applies at once without ending the session. nil means no such account.
+func (s *userStore) sessionKey(token, user string) []byte {
 	s.mu.RLock()
-	raw := s.raw
+	c, ok := s.users[user]
 	s.mu.RUnlock()
-	sum := sha256.Sum256(append([]byte("gary-session\x00"+token+"\x00"), raw...))
+	if !ok {
+		return nil
+	}
+	sum := sha256.Sum256([]byte("gary-session\x00" + token + "\x00" + user + "\x00" + encodeCredential(c)))
 	return sum[:]
+}
+
+// session checks a cookie against the key of the account it names.
+func (s *userStore) session(token, value string) (string, bool) {
+	enc, _, _ := strings.Cut(value, ".")
+	payload, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil {
+		return "", false
+	}
+	user, _, _ := strings.Cut(string(payload), "|")
+	key := s.sessionKey(token, user)
+	if key == nil {
+		return "", false
+	}
+	return validSession(key, value)
 }
 
 func newSession(key []byte, user string, ttl time.Duration) string {

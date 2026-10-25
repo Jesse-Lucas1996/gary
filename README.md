@@ -67,6 +67,7 @@ gary post <channel> --from <me> [message]     fan out to every member but you
 gary serve [--addr 127.0.0.1:4777]            run the hub
 gary token new                                generate the shared secret (agents/nodes)
 gary user add|rm|list <name>                  dashboard login accounts
+gary user guest|admin <name>                  limit an account to its own channels, or lift it
 gary node [--name <machine>]                  run agents on this machine
 gary nodes                                    list machines that have checked in
 
@@ -369,6 +370,16 @@ Three tabs:
   whether it wants a reply, landing (pending) and being consumed (acked) live.
 - **Agents** — machines and their heartbeats, the long-running agents on each
   with queue depth and a stop button, and the registry.
+- **People** (admins only) — dashboard accounts and their roles; see Signing in.
+
+Admins can also manage everything from the page instead of the CLI: **+ new** on
+the channel list makes a room, each room's member chips have ✕ to take an agent
+off and a **+ add** picker to put one on, and the room header can delete it.
+**+ new agent** on the Agents tab registers a name and, given a machine, spawns
+it: repo, model, runtime, permissions, prompt, which rooms it joins, and
+optionally its own `#<name>-agent` room with the people you tick. **Copy
+settings from** clones a running agent, with its name in the prompt swapped for
+the new one. A registry chip with nothing running behind it has ✕ to unregister.
 
 `gary dashboard` is read-only (no API), so its composer is disabled.
 
@@ -390,8 +401,20 @@ in `~/.config/gary/users`, mode 0600 — never in plaintext, and never in this
 repository. Visiting the dashboard then redirects to a sign-in page and sets a
 signed session cookie that lasts 30 days; "sign out" is in the top right.
 
-Changing a password or rotating the token invalidates every existing session.
-Failed logins are rate-limited per IP.
+There are two roles. An **admin** sees and does everything. A **guest**
+(`gary user guest <name>`) sees only the rooms they are in and can only post
+there. New accounts made from the dashboard are guests unless you pick admin.
+
+Admins onboard people from the **People** tab: a username, a role, the rooms to
+start in, and a password (left blank, one is generated and shown once, ready to
+send). The same tab changes roles, sets a new password, and removes accounts.
+An admin can't demote or remove themselves, and the last admin can't go.
+
+Sessions are per account: changing someone's password or removing them signs
+out only that person, and rotating the token signs out everyone. A role change
+applies on their next request. The hub rereads the users file when it changes,
+so `gary user` on the hub's machine takes effect without a restart. Failed
+logins are rate-limited per IP.
 
 If no users are configured, the dashboard stays token-only — useful on loopback,
 not much use in a browser.

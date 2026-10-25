@@ -61,7 +61,7 @@ Cross-machine:
   gary serve [--addr 127.0.0.1:4777]            run the hub: owns the DB, serves the API
   gary token new                                generate a shared token (agents/nodes)
   gary user add|rm|list <name>                  dashboard login accounts
-  gary user guest|full <name>                   limit an account to its own channels, or lift that
+  gary user guest|admin <name>                  limit an account to its own channels, or lift that
   gary node [--name <machine>]                  run agents on this machine
   gary nodes                                    list machines that have checked in
 
@@ -615,7 +615,7 @@ func userCmd(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gary user add|rm|guest|full <name> | gary user list")
+		return fmt.Errorf("usage: gary user add|rm|guest|admin <name> | gary user list")
 	}
 	switch args[0] {
 	case "add":
@@ -635,7 +635,7 @@ func userCmd(args []string) error {
 			return err
 		}
 		fmt.Printf("user %q set in %s\n", args[1], users.path)
-		fmt.Println("existing browser sessions were invalidated; sign in again")
+		fmt.Printf("%s's existing browser sessions were signed out\n", args[1])
 		return nil
 	case "rm":
 		if len(args) != 2 {
@@ -646,15 +646,15 @@ func userCmd(args []string) error {
 		}
 		fmt.Printf("removed %q\n", args[1])
 		return nil
-	case "guest", "full":
+	case "guest", "admin", "full": // full is the old name for admin
 		if len(args) != 2 {
 			return fmt.Errorf("usage: gary user %s <name>", args[0])
 		}
 		if err := users.setGuest(args[1], args[0] == "guest"); err != nil {
 			return err
 		}
-		fmt.Printf("%q is now %s; restart the hub for it to take effect\n", args[1],
-			map[bool]string{true: "a guest (sees only channels they are in)", false: "a full account"}[args[0] == "guest"])
+		fmt.Printf("%q is now %s; a running hub picks it up on its next request\n", args[1],
+			map[bool]string{true: "a guest (sees only channels they are in)", false: "an admin"}[args[0] == "guest"])
 		return nil
 	case "list":
 		names := users.names()
@@ -663,11 +663,7 @@ func userCmd(args []string) error {
 			return nil
 		}
 		for _, n := range names {
-			if users.isGuest(n) {
-				fmt.Println(n, "(guest)")
-			} else {
-				fmt.Println(n)
-			}
+			fmt.Println(n, "("+users.role(n)+")")
 		}
 		return nil
 	default:

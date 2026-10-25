@@ -38,7 +38,7 @@
     display: flex;
     flex-direction: column;
   }
-  button, input, textarea { font: inherit; color: inherit; }
+  button, input, textarea, select { font: inherit; color: inherit; }
   ::selection { background: var(--accent-soft); }
 
   /* ---------- scrollbars ---------- */
@@ -266,7 +266,40 @@
   .result .rbody { padding: .65rem .8rem; white-space: pre-wrap; overflow-wrap: anywhere;
                    max-height: 18rem; overflow-y: auto; font-size: .86rem; }
 
+  /* ---------- managing rooms and agents ---------- */
+  .sechead { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin: 1.8rem 0 .7rem; }
+  .sechead h2 { margin: 0; }
+  .add:hover { border-color: var(--accent); color: var(--accent); }
+  .chip .x { background: none; border: 0; color: var(--faint); cursor: pointer; padding: 0 0 0 .1rem; font-size: .72rem; line-height: 1; }
+  .chip .x:hover { color: var(--red); }
+  select.addmember {
+    background: var(--surface); border: 1px dashed var(--line); border-radius: 999px;
+    color: var(--dim); font-size: .76rem; padding: .12rem .5rem; cursor: pointer;
+  }
+  dialog.manage {
+    background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 0; width: min(36rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem);
+  }
+  dialog.manage::backdrop { background: rgba(0,0,0,.6); }
+  dialog.manage form { padding: 1rem 1.1rem; display: grid; gap: .75rem; }
+  dialog.manage h3 { margin: 0; font-size: 1rem; }
+  .field { display: grid; gap: .25rem; min-width: 0; }
+  .field > span { color: var(--dim); font-size: .78rem; }
+  .field input, .field select, .field textarea {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: .45rem .6rem; outline: none; width: 100%;
+  }
+  .field textarea { min-height: 9rem; resize: vertical; font: .8rem/1.45 var(--mono); }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+  .checks { display: flex; flex-wrap: wrap; gap: .35rem .9rem; }
+  .checks label { display: inline-flex; gap: .35rem; align-items: center; font-size: .84rem; cursor: pointer; }
+  .checks:empty::before { content: "none yet"; color: var(--faint); font-size: .84rem; }
+  .dlgfoot { display: flex; justify-content: flex-end; gap: .5rem; align-items: center; }
+  .dlgfoot .hint { flex: 1; }
+
   @media (max-width: 720px) {
+    .row2 { grid-template-columns: 1fr; }
     .rooms { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .roomlist { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
     header { padding: .6rem 1rem; padding-top: max(.6rem, env(safe-area-inset-top)); }
@@ -297,13 +330,14 @@
   <button class="tab on" data-tab="rooms">Rooms<span class="count" id="c-rooms"></span></button>
   <button class="tab" data-tab="inbox">Inbox<span class="count" id="c-inbox"></span></button>
   <button class="tab" data-tab="agents">Agents<span class="count" id="c-agents"></span></button>
+  <button class="tab" data-tab="people" id="people-tab" hidden>People<span class="count" id="c-people"></span></button>
 </nav>
 
 <main>
   <section class="panel on" id="p-rooms">
     <div class="rooms">
       <aside class="roomlist">
-        <div class="head"><h2>channels</h2></div>
+        <div class="head"><h2>channels</h2><button class="stop add" id="new-room" hidden>+ new</button></div>
         <div id="room-list"></div>
       </aside>
       <div class="room">
@@ -346,7 +380,7 @@
       <div class="chips" id="nodes"></div>
       <div class="empty" id="nodes-empty" style="display:none">no nodes — run <code>gary node</code> on a machine</div>
 
-      <h2>live agents</h2>
+      <div class="sechead"><h2>live agents</h2><button class="stop add" id="new-agent" hidden>+ new agent</button></div>
       <div class="card" id="spawns-card">
         <table>
           <thead><tr><th>agent</th><th>state</th><th>doing</th><th>queue</th><th>last turn</th><th></th></tr></thead>
@@ -362,14 +396,85 @@
       <div class="chips" id="agents-all"></div>
     </div>
   </section>
+
+  <section class="panel" id="p-people">
+    <div class="pad">
+      <div class="sechead" style="margin-top:0"><h2>dashboard accounts</h2><button class="stop add" id="new-person">+ add person</button></div>
+      <div class="card"><table>
+        <thead><tr><th>name</th><th>role</th><th>rooms</th><th></th></tr></thead>
+        <tbody id="people"></tbody>
+      </table></div>
+      <p class="hint" id="people-hint">An <b>admin</b> sees and manages everything: every room, every agent, starting agents
+        on your machines. A <b>guest</b> sees only the rooms they are in and can only post there.</p>
+    </div>
+  </section>
 </main>
+
+<dialog class="manage" id="room-dlg">
+  <form id="room-form">
+    <h3>New channel</h3>
+    <label class="field"><span>name</span><input name="name" required autocomplete="off" placeholder="standup"></label>
+    <label class="field"><span>description</span><input name="description" autocomplete="off"></label>
+    <div class="field"><span>members</span><div class="checks" id="room-members"></div></div>
+    <div class="dlgfoot"><span class="hint bad" id="room-err"></span>
+      <button type="button" class="stop" data-close>cancel</button><button type="submit" class="send">Create</button></div>
+  </form>
+</dialog>
+
+<dialog class="manage" id="person-dlg">
+  <form id="person-form">
+    <h3 id="person-title">Add a person</h3>
+    <div class="row2">
+      <label class="field"><span>username</span><input name="name" required autocomplete="off" placeholder="sam"></label>
+      <label class="field"><span>role</span><select name="role">
+        <option value="guest">guest (only their rooms)</option><option value="admin">admin (everything)</option></select></label>
+    </div>
+    <label class="field"><span>password (leave blank to generate one)</span><input name="password" type="text" autocomplete="off" minlength="8"></label>
+    <div class="field"><span>rooms</span><div class="checks" id="person-rooms"></div></div>
+    <div class="field" id="person-done" hidden><span>send them this</span><textarea readonly id="person-invite" style="min-height:5.5rem"></textarea></div>
+    <div class="dlgfoot"><span class="hint bad" id="person-err"></span>
+      <button type="button" class="stop" data-close id="person-cancel">cancel</button><button type="submit" class="send" id="person-go">Add</button></div>
+  </form>
+</dialog>
+
+<dialog class="manage" id="agent-dlg">
+  <form id="agent-form">
+    <h3>New agent</h3>
+    <label class="field"><span>copy settings from</span><select id="agent-copy"></select></label>
+    <div class="row2">
+      <label class="field"><span>name</span><input name="name" required autocomplete="off" placeholder="reviewer"></label>
+      <label class="field"><span>machine</span><select name="node" id="agent-node"></select></label>
+    </div>
+    <label class="field"><span>description</span><input name="description" autocomplete="off"></label>
+    <div id="agent-spawn" class="field" style="gap:.75rem">
+      <label class="field"><span>repo (working directory on that machine)</span><input name="repo" autocomplete="off"></label>
+      <div class="row2">
+        <label class="field"><span>model</span><input name="model" list="agent-models" autocomplete="off" placeholder="default"></label>
+        <label class="field"><span>runtime</span><select name="runtime"><option>claude</option><option>codex</option></select></label>
+      </div>
+      <datalist id="agent-models"></datalist>
+      <label class="field"><span>permissions</span><select name="permission_mode">
+        <option value="acceptEdits">acceptEdits (default)</option>
+        <option value="bypassPermissions">bypassPermissions (no permission checks)</option>
+        <option value="plan">plan</option>
+        <option value="default">default</option>
+      </select></label>
+      <label class="field"><span>system prompt</span><textarea name="prompt"></textarea></label>
+    </div>
+    <div class="field"><span>channels</span><div class="checks" id="agent-chans"></div></div>
+    <div class="field"><span><label style="cursor:pointer"><input type="checkbox" name="ownroom">
+      own room <b id="agent-room-name">#&lt;name&gt;-agent</b> with</label></span><div class="checks" id="agent-people"></div></div>
+    <div class="dlgfoot"><span class="hint bad" id="agent-err"></span>
+      <button type="button" class="stop" data-close>cancel</button><button type="submit" class="send" id="agent-go">Start</button></div>
+  </form>
+</dialog>
 
 <script>
 // ponytail: 1s polling, no websocket/SSE — SQLite has no notify, and this is the
 // same tradeoff `gary watch` makes. Fine at dashboard scale.
 const seen = new Set();
 let state = {};
-const TABS = ["rooms", "inbox", "agents"];
+const TABS = ["rooms", "inbox", "agents", "people"];
 let tab = location.hash.replace("#", "") || localStorage.getItem("gary.tab") || "rooms";
 if (!TABS.includes(tab)) tab = "rooms";
 let room = localStorage.getItem("gary.room") || null;
@@ -552,12 +657,22 @@ function renderRoom() {
   paint("room-head", `
     <div class="top"><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span>
       <span class="spacer"></span>
-      ${state.api && !state.guest ? `<button class="stop clear" id="clear-room">clear room</button>` : ""}</div>
+      ${admin() ? `<span class="actions"><button class="stop clear" id="clear-room">clear room</button>
+        <button class="stop" id="delete-room">delete</button></span>` : ""}</div>
     <div class="members">${(chan.members || []).map(m =>
-      `<span class="chip sm">${esc(m)}</span>`).join("") || `<span class="hint">nobody has joined yet</span>`}</div>`);
+      `<span class="chip sm">${esc(m)}${admin() ? `<button class="x" data-leave="${esc(m)}" title="Take ${esc(m)} off #${esc(chan.name)}">✕</button>` : ""}</span>`).join("")
+      || `<span class="hint">nobody has joined yet</span>`}
+      ${admin() ? addMemberPicker(chan) : ""}</div>`);
 
   const clearBtn = $("clear-room");
   if (clearBtn) clearBtn.onclick = () => clearRoom(chan.name);
+  const deleteBtn = $("delete-room");
+  if (deleteBtn) deleteBtn.onclick = () => deleteRoom(chan.name);
+  document.querySelectorAll("button[data-leave]").forEach(el => {
+    el.onclick = () => leaveRoom(chan.name, el.dataset.leave);
+  });
+  const picker = $("add-member");
+  if (picker) picker.onchange = () => picker.value && joinRoom(chan.name, picker.value);
 
   const posts = roomPosts(chan.name);
   const el = $("transcript");
@@ -606,6 +721,185 @@ async function clearRoom(name) {
     hint.classList.add("bad");
     hint.textContent = (await resp.json().catch(() => ({}))).error || "clear failed";
   }
+  tick();
+}
+
+// Everything below the read-only view: a full account on a hub with the API.
+// Guests never see these controls, and guestGate refuses the calls anyway.
+function admin() { return state.api && !state.guest; }
+
+async function api(path, body) {
+  const resp = await fetch(path, {method: "POST", headers: H, body: JSON.stringify(body)});
+  const out = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(out.error || path + " failed");
+  return out;
+}
+
+// Report a failed room action where the composer shows its errors.
+async function roomAction(fn) {
+  const hint = $("compose-hint");
+  try { await fn(); hint.classList.remove("bad"); }
+  catch (err) { hint.classList.add("bad"); hint.textContent = String(err.message || err); }
+  tick();
+}
+
+function addMemberPicker(chan) {
+  const out = (state.agents || []).map(a => a.name).filter(n => !(chan.members || []).includes(n));
+  if (!out.length) return "";
+  return `<select class="addmember" id="add-member" title="Put an agent on #${esc(chan.name)}">
+    <option value="">+ add</option>${out.map(n => `<option>${esc(n)}</option>`).join("")}</select>`;
+}
+
+function joinRoom(channel, agent) {
+  return roomAction(() => api("v1/channels/join", {Channel: channel, Agent: agent}));
+}
+
+function leaveRoom(channel, agent) {
+  if (!confirm(`Take ${agent} off #${channel}?\n\nIt stops getting the room's posts. Mail already delivered stays.`)) return;
+  return roomAction(() => api("v1/channels/leave", {Channel: channel, Agent: agent}));
+}
+
+// Deleting drops the membership, not the mail it already fanned out.
+function deleteRoom(name) {
+  if (!confirm(`Delete #${name}?\n\nThe room and its member list go. Posts already delivered stay in ` +
+               `the agents' inboxes, and its agents keep running.`)) return;
+  return roomAction(() => api("v1/channels/rm", {Name: name}));
+}
+
+function checks(items, name, on) {
+  return items.map(v => `<label><input type="checkbox" name="${name}" value="${esc(v)}" ${on(v) ? "checked" : ""}>${esc(v)}</label>`).join("");
+}
+function checked(form, name) {
+  return [...form.querySelectorAll(`input[name="${name}"]:checked`)].map(el => el.value);
+}
+
+function openDialog(id) {
+  const dlg = $(id);
+  dlg.querySelector(".hint.bad").textContent = "";
+  dlg.showModal();
+  dlg.querySelector("input[name=name]").focus();
+}
+document.querySelectorAll("dialog [data-close]").forEach(el => el.onclick = () => el.closest("dialog").close());
+
+function newRoom() {
+  const f = $("room-form");
+  f.reset();
+  $("room-members").innerHTML = checks((state.agents || []).map(a => a.name), "member", n => n === state.me);
+  openDialog("room-dlg");
+}
+
+async function createRoom(e) {
+  e.preventDefault();
+  const f = e.target, name = f.elements.name.value.trim();
+  try {
+    await api("v1/channels/new", {Name: name, Description: f.elements.description.value.trim()});
+    for (const m of checked(f, "member")) await api("v1/channels/join", {Channel: name, Agent: m});
+    $("room-dlg").close();
+    room = name;
+    localStorage.setItem("gary.room", room);
+  } catch (err) {
+    $("room-err").textContent = String(err.message || err);
+  }
+  tick();
+}
+
+// People are the names nothing ever spawned: dashboard logins and hand-registered agents.
+function people() {
+  const spawned = new Set((state.spawns || []).map(s => s.agent));
+  return (state.agents || []).filter(a => !a.node && !spawned.has(a.name)).map(a => a.name);
+}
+
+function liveSpawn(name) {
+  return (state.spawns || []).find(s => s.agent === name && LIVE.has(s.status));
+}
+
+function newAgent() {
+  const f = $("agent-form");
+  f.reset();
+  const live = (state.spawns || []).filter(s => LIVE.has(s.status));
+  $("agent-copy").innerHTML = `<option value="">nothing (start blank)</option>` +
+    live.map(s => `<option value="${s.id}">${esc(s.agent)} · ${esc(s.model || "default model")}</option>`).join("");
+  $("agent-node").innerHTML = (state.nodes || []).map(n => `<option>${esc(n.name)}</option>`).join("") +
+    `<option value="">none (register only)</option>`;
+  const models = new Set(["opus", "sonnet", "haiku", ...(state.spawns || []).map(s => s.model).filter(Boolean)]);
+  $("agent-models").innerHTML = [...models].map(m => `<option value="${esc(m)}">`).join("");
+  f.elements.repo.value = live[0]?.repo || "";
+  $("agent-chans").innerHTML = checks((state.channels || []).map(c => c.name), "chan", () => false);
+  $("agent-people").innerHTML = checks(people(), "person", n => n === state.me);
+  copied = null;
+  agentFormChanged();
+  openDialog("agent-dlg");
+}
+
+// "Copy settings from" clones a running agent: machine, repo, model, runtime,
+// permissions, rooms, and its prompt with the old name swapped for the new one
+// (so "post nick-opus-agent --from nick-opus" becomes the new agent's own room).
+let copied = null;   // {spawn, prompt} — prompt as last filled, to tell a hand edit from ours
+function copyFrom(id) {
+  const f = $("agent-form").elements;
+  const s = (state.spawns || []).find(s => String(s.id) === id);
+  copied = s ? {spawn: s, prompt: null} : null;
+  if (!s) { agentFormChanged(); return; }
+  f.node.value = s.node;
+  f.repo.value = s.repo;
+  f.model.value = s.model;
+  f.runtime.value = s.runtime || "claude";
+  f.permission_mode.value = s.permission_mode || "acceptEdits";
+  const own = (state.channels || []).find(c => c.name === s.agent + "-agent");
+  const rooms = (state.channels || []).filter(c => c !== own && (c.members || []).includes(s.agent)).map(c => c.name);
+  document.querySelectorAll('#agent-chans input').forEach(el => el.checked = rooms.includes(el.value));
+  f.ownroom.checked = !!own;
+  if (own) document.querySelectorAll('#agent-people input').forEach(el => el.checked = own.members.includes(el.value));
+  agentFormChanged();
+}
+
+function agentFormChanged() {
+  const f = $("agent-form").elements, name = f.name.value.trim();
+  $("agent-spawn").style.display = f.node.value ? "" : "none";
+  $("agent-go").textContent = f.node.value ? "Start" : "Register";
+  $("agent-room-name").textContent = `#${name || "<name>"}-agent`;
+  if (copied && (copied.prompt === null || f.prompt.value === copied.prompt)) {
+    const old = copied.spawn.agent;
+    f.prompt.value = copied.prompt = name ? copied.spawn.prompt.split(old).join(name) : copied.spawn.prompt;
+  }
+}
+
+// Register, then rooms, then spawn last: every step before it is idempotent, so a
+// failure part-way can just be submitted again without starting the agent twice.
+async function createAgent(e) {
+  e.preventDefault();
+  const f = e.target.elements, name = f.name.value.trim(), node = f.node.value;
+  const err = $("agent-err");
+  if (node && liveSpawn(name)) { err.textContent = `${name} is already running — stop it first`; return; }
+  const repo = f.repo.value.trim(), runtime = f.runtime.value;
+  if (node && !repo) { err.textContent = "a spawned agent needs a repo"; return; }
+  $("agent-go").disabled = true;
+  try {
+    await api("v1/register", {Name: name, Description: f.description.value.trim() || (node ? `${runtime} agent in ${repo}` : "")});
+    if (f.ownroom.checked) {
+      const own = name + "-agent", who = checked(e.target, "person");
+      await api("v1/channels/new", {Name: own, Description: `${who.join(", ") || "talk to"} ↔ ${name}`});
+      for (const m of [...who, name]) await api("v1/channels/join", {Channel: own, Agent: m});
+    }
+    for (const c of checked(e.target, "chan")) await api("v1/channels/join", {Channel: c, Agent: name});
+    if (node) await api("v1/spawn", {agent: name, node, repo, prompt: f.prompt.value, model: f.model.value.trim(),
+                                     permission_mode: f.permission_mode.value, runtime});
+    $("agent-dlg").close();
+  } catch (ex) {
+    err.textContent = String(ex.message || ex);
+  } finally {
+    $("agent-go").disabled = false;
+  }
+  tick();
+}
+
+// Unregistering drops the agent's own unread mail, so only offer it for names
+// with nothing running behind them.
+async function unregister(name) {
+  const waiting = (state.messages || []).filter(m => m.to === name && m.status === "pending").length;
+  if (!confirm(`Unregister ${name}?\n\nIt leaves every room` + (waiting ? ` and its ${waiting} unread message${waiting === 1 ? "" : "s"} are deleted` : "") +
+               `. Mail it sent stays.`)) return;
+  try { await api("v1/unregister", {Name: name}); } catch (err) { alert(err.message || err); }
   tick();
 }
 
@@ -790,8 +1084,12 @@ function renderAgents() {
 
   paint("agents-all", (state.agents || []).map(a =>
     `<div class="chip">${esc(a.name)}${a.node ? `<span class="sub">${esc(a.node)}</span>` : ""}
-      <span class="sub">${ago(a.last_seen)}</span></div>`).join("")
+      <span class="sub">${ago(a.last_seen)}</span>${admin() && !liveSpawn(a.name) && a.name !== state.me
+        ? `<button class="x" data-unreg="${esc(a.name)}" title="Unregister ${esc(a.name)}">✕</button>` : ""}</div>`).join("")
     || `<span class="hint">no agents registered</span>`);
+  document.querySelectorAll("button[data-unreg]").forEach(el => {
+    el.onclick = () => unregister(el.dataset.unreg);
+  });
 }
 
 // A spawn row reads "running" from the moment it starts until it stops; the
@@ -827,6 +1125,94 @@ function doing(s, st) {
       cls === "stuck" ? " on this step — may be stuck" : ""}</span></span>`;
 }
 
+/* ---------------- people ---------------- */
+
+// Accounts aren't in /api/state (they're the hub's users file, not the database),
+// so the tab fetches them when it opens and after every change.
+let users = [];
+async function loadPeople() {
+  if (!admin()) return;
+  try {
+    const resp = await fetch("v1/users");
+    if (resp.ok) users = await resp.json();
+  } catch {}
+  renderPeople();
+}
+
+function renderPeople() {
+  $("c-people").textContent = users.length || "";
+  const rooms = n => (state.channels || []).filter(c => (c.members || []).includes(n)).map(c => c.name);
+  paint("people", users.map(u => `<tr>
+      <td><span class="agentname">${esc(u.name)}</span>${u.name === state.me ? ` <span class="sub hint">you</span>` : ""}</td>
+      <td><select class="addmember" data-role="${esc(u.name)}" ${u.name === state.me ? "disabled title=\"ask another admin\"" : ""}>
+        ${["admin", "guest"].map(r => `<option ${r === u.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+      <td><div class="chips">${rooms(u.name).map(c => `<span class="chip sm">#${esc(c)}</span>`).join("") || `<span class="idle-note">none</span>`}</div></td>
+      <td><div class="actions"><button class="stop reset" data-repass="${esc(u.name)}">new password</button>
+        ${u.name === state.me ? "" : `<button class="stop" data-rmuser="${esc(u.name)}">remove</button>`}</div></td>
+    </tr>`).join(""));
+  document.querySelectorAll("select[data-role]").forEach(el => el.onchange = () => setRole(el.dataset.role, el.value));
+  document.querySelectorAll("button[data-repass]").forEach(el => el.onclick = () => personDialog(el.dataset.repass));
+  document.querySelectorAll("button[data-rmuser]").forEach(el => el.onclick = () => removePerson(el.dataset.rmuser));
+}
+
+async function setRole(name, role) {
+  const what = role === "admin" ? "an admin: every room, every agent, and starting agents on your machines" :
+                                  "a guest: only the rooms they are in";
+  // The select already shows the new role; repaint from the real one if refused.
+  if (confirm(`Make ${name} ${what}?`)) {
+    try { await api("v1/users/role", {Name: name, Role: role}); } catch (err) { alert(err.message || err); }
+  }
+  painted.delete("people");
+  loadPeople();
+}
+
+async function removePerson(name) {
+  if (!confirm(`Remove ${name}'s login?\n\nThey are signed out at once. Their name stays in the rooms ` +
+               `(take it off there, or unregister it in Agents).`)) return;
+  try { await api("v1/users/rm", {Name: name}); } catch (err) { alert(err.message || err); }
+  loadPeople();
+}
+
+// One dialog for both: a new person, or a new password for an existing one.
+let personFor = null;
+function personDialog(existing) {
+  personFor = existing || null;
+  const f = $("person-form");
+  f.reset();
+  f.elements.name.value = existing || "";
+  f.elements.name.readOnly = !!existing;
+  f.elements.role.closest(".field").style.display = existing ? "none" : "";
+  $("person-rooms").closest(".field").style.display = existing ? "none" : "";
+  $("person-rooms").innerHTML = checks((state.channels || []).map(c => c.name), "room", () => false);
+  $("person-title").textContent = existing ? `New password for ${existing}` : "Add a person";
+  $("person-go").textContent = existing ? "Set password" : "Add";
+  $("person-go").hidden = false;
+  $("person-cancel").textContent = "cancel";
+  $("person-done").hidden = true;
+  openDialog("person-dlg");
+}
+
+async function savePerson(e) {
+  e.preventDefault();
+  const f = e.target.elements, name = f.name.value.trim();
+  const body = {name, password: f.password.value};
+  if (!personFor) Object.assign(body, {role: f.role.value, channels: checked(e.target, "room")});
+  try {
+    const out = await api("v1/users/set", body);
+    const pw = out.password || f.password.value;
+    const where = location.href.replace(/#.*$/, "");
+    $("person-invite").value = `gary: ${where}\nusername: ${name}\npassword: ${pw}`;
+    $("person-done").hidden = false;
+    $("person-go").hidden = true;
+    $("person-cancel").textContent = "done";
+    $("person-invite").select();
+  } catch (err) {
+    $("person-err").textContent = String(err.message || err);
+  }
+  loadPeople();
+  tick();
+}
+
 /* ---------------- shell ---------------- */
 
 function setTab(name) {
@@ -836,6 +1222,7 @@ function setTab(name) {
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.tab === name));
   document.querySelectorAll(".panel").forEach(p => p.classList.toggle("on", p.id === "p-" + name));
   if (name === "rooms") $("compose").focus();
+  if (name === "people") loadPeople();
 }
 
 function render() {
@@ -855,10 +1242,14 @@ function render() {
   $("c-inbox").textContent = (state.messages || []).filter(m => m.status === "pending").length;
   $("c-agents").textContent = (state.agents || []).length;
 
+  $("new-room").hidden = $("new-agent").hidden = $("people-tab").hidden = !admin();
+  if (tab === "people" && !admin()) setTab("rooms");
+
   renderRoomList();
   renderRoom();
   renderInbox();
   renderAgents();
+  if (tab === "people") renderPeople();
   ping();
   firstPaint = false;
 }
@@ -893,6 +1284,15 @@ addEventListener("hashchange", () => {
   if (TABS.includes(want) && want !== tab) setTab(want);
 });
 $("composer").onsubmit = submit;
+$("new-room").onclick = newRoom;
+$("room-form").onsubmit = createRoom;
+$("new-agent").onclick = newAgent;
+$("agent-form").onsubmit = createAgent;
+$("agent-copy").onchange = e => copyFrom(e.target.value);
+$("agent-form").elements.name.oninput = agentFormChanged;
+$("agent-form").elements.node.onchange = agentFormChanged;
+$("new-person").onclick = () => personDialog();
+$("person-form").onsubmit = savePerson;
 $("compose-attach").onclick = () => $("compose-file").click();
 $("compose-file").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
 $("compose-pending").onclick = e => {

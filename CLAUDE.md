@@ -69,7 +69,7 @@ gary post <channel> --from <me> [message]     fan out to every member but the se
 gary serve [--addr 127.0.0.1:4777]            run the hub
 gary token new                                generate the shared secret (agents/nodes)
 gary user add|rm|list <name>                  dashboard login accounts
-gary user guest|full <name>                   limit an account to its own channels, or lift it
+gary user guest|admin <name>                  limit an account to its own channels, or lift it
 gary node [--name <machine>]                  run agents on this machine
 gary nodes                                    list machines that have checked in
 
@@ -286,9 +286,14 @@ to `~/.config/gary/users`, and a successful sign-in sets an HMAC-signed session
 cookie. Either credential authorises a request; the dashboard is not a lesser
 door, it just has a door a person can use.
 
-Session cookies are keyed on the token *and* the contents of the users file, so
-rotating the token or changing a password invalidates every outstanding session
-without needing server-side session state. Failed logins are rate-limited per
+Session cookies are keyed on the token *and* that account's own password hash,
+so rotating the token signs everyone out and changing one password (or removing
+the account) signs out only that person, without server-side session state. The
+role is deliberately not in the key: `guestGate` reads it on every request, so a
+promotion or demotion applies at once. The hub rereads the users file when its
+mtime or size changes (`userStore.refresh`, one stat per request), so `gary user`
+from another process takes effect without a restart; a file that fails to parse
+keeps the accounts already loaded. Failed logins are rate-limited per
 client IP (5 attempts, then a lockout), and an unknown username still pays the
 full PBKDF2 cost so timing does not reveal which names exist.
 
@@ -298,15 +303,22 @@ session cookie when installing the app. They are static and carry no data; the
 service worker caches only the icons and never the dashboard, the API or the
 login page.
 
-**Guest accounts** (`gary user guest <name>`, undone by `gary user full`) are
+**Roles.** An account is an *admin* (everything) or a *guest*. Admins manage
+accounts from the dashboard's People tab through `/v1/users*` (list, set with a
+role, rooms and a generated password, role, rm); guests are refused there like
+everywhere outside their gate. `mayChange` stops an admin demoting or removing
+their own account and stops the last admin going, so the dashboard can't lock
+its operators out. `full` is still accepted as the old name for `admin`.
+
+**Guest accounts** (`gary user guest <name>`, undone by `gary user admin`) are
 for people you work with, not operators. A guest's dashboard state is trimmed to
 the channels they are a member of (their mail, those channels' agents and spawns,
 no spawn prompts), and `guestGate` lets a guest session reach only the dashboard,
 `/api/state`, registering as itself and posting as itself to its own channels.
-Everything else is 403. The role is a `:guest` suffix on the users-file line, so
-changing it rotates sessions like any other users-file change. It limits what
+Everything else is 403. The role is a `:guest` suffix on the users-file line. It limits what
 the guest can reach through gary, nothing more: an agent the guest can talk to
-still runs with that agent's own access.
+still runs with that agent's own access. Promoting a guest to admin gives them
+everything an admin has, spawning agents on your machines included.
 
 With no users configured, the hub falls back to token-only: an API client gets
 401, and a browser gets 401 rather than a login page it cannot use.
@@ -504,7 +516,11 @@ needs a network or a credential. What the suite must keep covering:
   early on delivery and empty at its deadline.
 - **Auth** — hash round-trip, that no plaintext password reaches disk, session
   signing/expiry/tamper, that changing a password invalidates sessions, the
-  login flow end to end, and lockout after repeated failures.
+  login flow end to end, lockout after repeated failures, sessions being per
+  account, and an outside edit of the users file being picked up.
+- **Roles** — an admin onboarding a guest (generated password works, rooms
+  joined, nobody else signed out), guests refused account management, a
+  promotion applying without a new sign-in, and admins unable to lock themselves out.
 - **Mounting** — the whole hub behind a stripped `/gary/` prefix, since the
   dashboard and login redirects are relative and easy to regress.
 - **Spawning** — atomic claim under concurrency, the exact `claude` argv and

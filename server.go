@@ -49,6 +49,7 @@ func hubHandler(s *Store, o serveOpts) http.Handler {
 	mux := http.NewServeMux()
 	if o.api {
 		registerAPI(mux, s)
+		registerUsers(mux, s, o)
 	}
 	registerDashboard(mux, s, o)
 	registerLogin(mux, o)
@@ -82,7 +83,7 @@ func registerLogin(mux *http.ServeMux, o serveOpts) {
 			lim.ok(ip)
 			http.SetCookie(w, &http.Cookie{
 				Name:     sessionCookie,
-				Value:    newSession(o.users.sessionKey(o.token), user, sessionTTL),
+				Value:    newSession(o.users.sessionKey(o.token, user), user, sessionTTL),
 				Path:     "/",
 				HttpOnly: true,
 				Secure:   isHTTPS(r),
@@ -207,8 +208,9 @@ func isLoopback(host string) bool {
 }
 
 func authMiddleware(o serveOpts, next http.Handler) http.Handler {
-	open := o.token == "" && o.users.empty()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.users.refresh()
+		open := o.token == "" && o.users.empty()
 		if _, static := pwaFiles[r.URL.Path]; static || r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
 			return
@@ -231,7 +233,7 @@ func authorized(o serveOpts, r *http.Request) bool {
 		return true
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		if _, ok := validSession(o.users.sessionKey(o.token), c.Value); ok {
+		if _, ok := o.users.session(o.token, c.Value); ok {
 			return true
 		}
 	}
@@ -461,13 +463,134 @@ func registerAPI(mux *http.ServeMux, s *Store) {
 	})
 }
 
+// registerUsers lets an admin onboard people from the dashboard: add an account
+// with a role and a generated password, change a role, reset a password, remove
+// one. Guests never get here (guestGate). The hub's own userStore does the write,
+// so the change is live at once. An admin can't demote or remove themselves, and
+// the last admin can't go, so the dashboard can't lock its own operators out.
+func registerUsers(mux *http.ServeMux, s *Store, o serveOpts) {
+	handle(mux, "/v1/users", func(r *http.Request) (any, error) {
+		out := []userInfo{}
+		for _, n := range o.users.names() {
+			out = append(out, userInfo{Name: n, Role: o.users.role(n)})
+		}
+		return out, nil
+	})
+	handle(mux, "/v1/users/set", func(r *http.Request) (any, error) {
+		var in struct {
+			Name     string   `json:"name"`
+			Role     string   `json:"role"`     // admin|guest; "" keeps an existing account's role, guest for a new one
+			Password string   `json:"password"` // "" generates one, returned once
+			Channels []string `json:"channels"` // rooms to put a new person in
+		}
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		if err := checkRole(in.Role, true); err != nil {
+			return nil, err
+		}
+		exists := o.users.exists(in.Name)
+		if in.Role == "" && !exists {
+			in.Role = "guest"
+		}
+		if in.Role != "" {
+			if err := mayChange(o, r, in.Name, in.Role); err != nil {
+				return nil, err
+			}
+		}
+		pw, generated := in.Password, in.Password == ""
+		if generated {
+			pw = randomPassword()
+		}
+		if err := o.users.setWithRole(in.Name, pw, in.Role); err != nil {
+			return nil, err
+		}
+		// A person is addressable like any agent (invariant 3), so register the
+		// name before putting it in rooms; a first post would register it anyway.
+		if !exists || len(in.Channels) > 0 {
+			if err := s.Register(in.Name, "dashboard"); err != nil {
+				return nil, err
+			}
+		}
+		for _, c := range in.Channels {
+			if err := s.JoinChannel(c, in.Name); err != nil {
+				return nil, err
+			}
+		}
+		out := map[string]string{"name": in.Name, "role": o.users.role(in.Name)}
+		if generated {
+			out["password"] = pw
+		}
+		return out, nil
+	})
+	handle(mux, "/v1/users/role", func(r *http.Request) (any, error) {
+		var in struct{ Name, Role string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		if err := checkRole(in.Role, false); err != nil {
+			return nil, err
+		}
+		if err := mayChange(o, r, in.Name, in.Role); err != nil {
+			return nil, err
+		}
+		return ok{}, o.users.setGuest(in.Name, in.Role == "guest")
+	})
+	handle(mux, "/v1/users/rm", func(r *http.Request) (any, error) {
+		var in struct{ Name string }
+		if err := decode(r, &in); err != nil {
+			return nil, err
+		}
+		if err := mayChange(o, r, in.Name, ""); err != nil {
+			return nil, err
+		}
+		return ok{}, o.users.remove(in.Name)
+	})
+}
+
+type userInfo struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+func checkRole(role string, blankOK bool) error {
+	if role == "admin" || role == "guest" || (blankOK && role == "") {
+		return nil
+	}
+	return fmt.Errorf("role must be admin or guest, got %q", role)
+}
+
+// mayChange refuses the changes that would lock the dashboard out: an admin
+// demoting or removing themselves, or the last admin going. role "" is removal.
+func mayChange(o serveOpts, r *http.Request, name, role string) error {
+	if !o.users.exists(name) || role == "admin" {
+		return nil
+	}
+	if o.users.role(name) != "admin" {
+		return nil
+	}
+	if name == sessionUser(o, r) {
+		return fmt.Errorf("you can't demote or remove your own account; ask another admin")
+	}
+	admins := 0
+	for _, n := range o.users.names() {
+		if o.users.role(n) == "admin" {
+			admins++
+		}
+	}
+	if admins <= 1 {
+		return fmt.Errorf("%s is the last admin", name)
+	}
+	return nil
+}
+
 // sessionUser is the signed-in dashboard account, or "" for a token-only client.
 func sessionUser(o serveOpts, r *http.Request) string {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return ""
 	}
-	name, ok := validSession(o.users.sessionKey(o.token), c.Value)
+	name, ok := o.users.session(o.token, c.Value)
 	if !ok {
 		return ""
 	}
@@ -475,7 +598,7 @@ func sessionUser(o serveOpts, r *http.Request) string {
 }
 
 func registerDashboard(mux *http.ServeMux, s *Store, o serveOpts) {
-	dbPath, api, login := o.dbPath, o.api, !o.users.empty()
+	dbPath, api := o.dbPath, o.api
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -528,7 +651,7 @@ func registerDashboard(mux *http.ServeMux, s *Store, o serveOpts) {
 			"agents": nilAsEmpty(agents), "messages": nilAsEmpty(msgs),
 			"nodes": nilAsEmpty(nodes), "spawns": nilAsEmpty(spawns),
 			"channels": nilAsEmpty(channels), "me": me, "guest": guest,
-			"db_path": path, "api": api, "login": login, "stale_after": int64(3 * heartbeatEvery / time.Second),
+			"db_path": path, "api": api, "login": !o.users.empty(), "stale_after": int64(3 * heartbeatEvery / time.Second),
 		})
 	})
 }

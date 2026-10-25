@@ -95,15 +95,79 @@ func TestSessionCookieSigning(t *testing.T) {
 
 func TestChangingPasswordInvalidatesSessions(t *testing.T) {
 	u := testUsers(t, "admin", "first password")
-	tok := newSession(u.sessionKey("tok"), "admin", time.Hour)
-	if _, ok := validSession(u.sessionKey("tok"), tok); !ok {
+	tok := newSession(u.sessionKey("tok", "admin"), "admin", time.Hour)
+	if _, ok := u.session("tok", tok); !ok {
 		t.Fatal("session should be valid before the change")
 	}
 	if err := u.set("admin", "second password"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := validSession(u.sessionKey("tok"), tok); ok {
+	if _, ok := u.session("tok", tok); ok {
 		t.Fatal("old session survived a password change")
+	}
+}
+
+// Onboarding someone, or resetting their password, must not sign anyone else out.
+func TestSessionsArePerAccount(t *testing.T) {
+	u := testUsers(t, "admin", "admin password")
+	if err := u.set("nick", "nick password"); err != nil {
+		t.Fatal(err)
+	}
+	admin := newSession(u.sessionKey("tok", "admin"), "admin", time.Hour)
+	nick := newSession(u.sessionKey("tok", "nick"), "nick", time.Hour)
+	if err := u.set("nick", "new nick password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.set("newcomer", "newcomer password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := u.session("tok", admin); !ok {
+		t.Fatal("another account's password change signed admin out")
+	}
+	if _, ok := u.session("tok", nick); ok {
+		t.Fatal("nick's old session survived his password change")
+	}
+	if err := u.setGuest("admin", true); err != nil {
+		t.Fatal(err)
+	}
+	if name, ok := u.session("tok", admin); !ok || name != "admin" {
+		t.Fatal("a role change should apply without ending the session")
+	}
+	if err := u.remove("admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := u.session("tok", admin); ok {
+		t.Fatal("a removed account's session still works")
+	}
+	if _, ok := u.session("other-token", newSession(u.sessionKey("tok", "nick"), "nick", time.Hour)); ok {
+		t.Fatal("a session outlived a token rotation")
+	}
+}
+
+// `gary user` writes the file from another process; the hub must notice.
+func TestUsersFileEditedElsewhereIsPickedUp(t *testing.T) {
+	hub := testUsers(t, "admin", "admin password")
+	cli, err := loadUsers(hub.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond) // a distinct mtime even on coarse filesystems
+	if err := cli.set("nick", "nick password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.setGuest("nick", true); err != nil {
+		t.Fatal(err)
+	}
+	hub.refresh()
+	if !hub.verify("nick", "nick password") || !hub.isGuest("nick") {
+		t.Fatal("hub did not pick up the outside edit")
+	}
+	if err := os.WriteFile(hub.path, []byte("garbage line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub.refresh()
+	if !hub.verify("admin", "admin password") {
+		t.Fatal("a broken users file should keep the accounts already loaded")
 	}
 }
 
