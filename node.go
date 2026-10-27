@@ -361,7 +361,9 @@ func readCodexStream(rd io.Reader, step func(string)) codexResult {
 				case "thread.started":
 					res.thread = ev.ThreadID
 				case "turn.completed":
-					res.done = true
+					// codex also emits "error" for a stream drop it then retries
+					// ("Reconnecting... 2/5"); a completed turn recovered from it.
+					res.done, res.err = true, ""
 				case "turn.failed":
 					res.err = ev.Error.Message
 				case "error":

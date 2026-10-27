@@ -401,6 +401,14 @@ func TestReadCodexStream(t *testing.T) {
 	if failed.done || failed.err != "429 Too Many Requests" || failed.thread != "t2" {
 		t.Fatalf("failed turn: %+v", failed)
 	}
+
+	recovered := readCodexStream(strings.NewReader(`{"type":"thread.started","thread_id":"t3"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: websocket closed by server before response.completed)"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":1}}`), func(string) {})
+	if !recovered.done || recovered.err != "" || recovered.last != "done" {
+		t.Fatalf("a turn that reconnected and completed must succeed: %+v", recovered)
+	}
 }
 
 func TestSpawnRuntime(t *testing.T) {
