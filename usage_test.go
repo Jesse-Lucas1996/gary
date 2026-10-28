@@ -116,3 +116,17 @@ func TestUsageRateLimitServesLastReading(t *testing.T) {
 		t.Fatalf("restart with saved reading: %+v %v", rep, err)
 	}
 }
+
+// No test talks to Anthropic or touches the real saved reading: guest_test hits
+// /api/usage through the full handler, which used the box's real login (adding
+// to the very 429s this cache works around) and, with the cache, wrote
+// ~/.local/share/gary/usage.json.
+func TestMain(m *testing.M) {
+	dir, _ := os.MkdirTemp("", "gary-usage-test")
+	usageSavePath = func() string { return filepath.Join(dir, "usage.json") }
+	usageCredsPath = func() string { return filepath.Join(dir, "no-credentials.json") }
+	usageURL = "http://127.0.0.1:1/usage-disabled-in-tests"
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
