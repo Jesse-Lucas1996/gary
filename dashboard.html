@@ -308,25 +308,89 @@
   .dlgfoot { display: flex; justify-content: flex-end; gap: .5rem; align-items: center; }
   .dlgfoot .hint { flex: 1; }
 
+  .back { display: none; }
   @media (max-width: 720px) {
+    /* ---- phone / installed PWA ---- */
+    body { font-size: 15px; }
     .row2 { grid-template-columns: 1fr; }
-    .rooms { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    .roomlist { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
-    header { padding: .6rem 1rem; padding-top: max(.6rem, env(safe-area-inset-top)); }
+
+    /* header: one line (brand, live status, sign out); usage on its own slim row under it */
+    header { flex-wrap: wrap; gap: .3rem .7rem; padding: .55rem .9rem .45rem;
+             padding-top: max(.55rem, env(safe-area-inset-top)); }
     .brand .dbpath { display: none; }
-    nav.tabs { padding: .45rem .5rem 0; overflow-x: auto; }
-    .tab { padding: .45rem .6rem .55rem; }
-    .pad { padding: 1rem; }
-    .transcript { padding: 1rem; }
-    .composer { padding: .7rem 1rem calc(.8rem + env(safe-area-inset-bottom)); }
-    .composer .foot .hint { font-size: .72rem; }
-    table { min-width: 40rem; }
-    .doing { min-width: 14rem; }
-    .result .rhead { flex-wrap: wrap; }
-    /* phones: Claude and Codex usage on two short lines instead of one long one */
-    .usage { font-size: .68rem; line-height: 1.35; text-align: right; }
-    .usage .svc { display: block; }
+    .pulse { min-width: 0; flex: 1; font-size: .78rem; }
+    .pulse .ptext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .signout { font-size: .75rem; }
+    .usage { order: 9; flex-basis: 100%; font-size: .68rem; display: flex; flex-wrap: wrap; gap: .1rem .9rem; }
+    .usage:empty { display: none; }
     .usage .sep { display: none; }
+
+    /* tabs: a bottom bar within thumb reach, above the home indicator */
+    nav.tabs {
+      order: 3; border-bottom: 0; border-top: 1px solid var(--line); background: rgba(19,19,23,.92);
+      backdrop-filter: blur(12px); padding: .25rem .4rem calc(.25rem + env(safe-area-inset-bottom));
+      justify-content: space-around; gap: 0;
+    }
+    main { order: 2; }
+    .tab { flex: 1; border: 0; border-radius: 10px; padding: .55rem .2rem; font-size: .8rem;
+           display: flex; flex-direction: column; align-items: center; gap: .15rem; }
+    .tab.on { background: var(--accent-soft); color: var(--accent); }
+    .tab .count { margin: 0; font-size: .66rem; }
+
+    /* rooms: the list, or one room full screen with a back button */
+    .rooms { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+    .roomlist { border-right: 0; max-height: none; padding: .6rem .6rem 1rem; }
+    .rooms.open .roomlist { display: none; }
+    .rooms:not(.open) .room { display: none; }
+    .roomitem { padding: .75rem .8rem; margin-bottom: .3rem; background: var(--surface); border: 1px solid var(--line-soft); }
+    .roomitem.on { background: var(--surface); }
+    .roomitem.on .name { color: var(--text); }
+    .roomitem .name { font-size: 1rem; }
+    .back { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 2rem; height: 2rem;
+            margin: -.3rem .1rem -.3rem -.4rem; border: 0; border-radius: 8px; background: none; color: var(--accent);
+            font-size: 1.35rem; line-height: 1; cursor: pointer; }
+    .roomhead { padding: .55rem .9rem; }
+    .roomhead .top { align-items: center; }
+    .roomhead .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; cursor: pointer; }
+    .roomhead .title::after { content: " ▾"; color: var(--faint); font-size: .8rem; }
+    .roomhead.expanded .title::after { content: " ▴"; }
+    .roomhead .desc { display: none; }
+    .roomhead.expanded .desc { display: block; margin: .35rem 0 0; }
+    .roomhead .members, .roomhead .top .actions { display: none; }
+    .roomhead.expanded .members { display: flex; }
+    .roomhead.expanded .top .actions { display: flex; }
+    .roomhead.expanded .top { flex-wrap: wrap; }
+    .transcript { padding: .8rem .9rem; }
+    .composer { padding: .55rem .8rem .6rem; }
+    .composer .foot .hint { font-size: .7rem; }
+    .composer textarea { font-size: 16px; } /* 16px stops iOS zooming into the box */
+
+    /* tables become cards: one block per row, each cell labelled */
+    .pad { padding: .9rem; }
+    .card { overflow: visible; background: none; border: 0; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { display: none; }
+    tbody tr { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+               margin-bottom: .6rem; padding: .55rem .75rem; }
+    tbody tr:hover { background: var(--surface); }
+    td { border: 0; padding: .2rem 0; }
+    td[data-label]::before { content: attr(data-label); display: block; color: var(--faint); font-size: .66rem;
+                             text-transform: uppercase; letter-spacing: .06em; margin-bottom: .05rem; }
+    td.inline { display: inline-block; width: auto; margin-right: .8rem; }
+    td:empty { display: none; }
+    .doing { min-width: 0; max-width: none; }
+    .body { max-width: none; }
+    .actions { flex-wrap: wrap; }
+
+    /* filters scroll sideways instead of stacking five rows high */
+    #agents-filter { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .3rem; -webkit-overflow-scrolling: touch; }
+    #agents-filter .chip { flex: none; }
+
+    /* dialogs: full width, tidy two-column checkboxes */
+    dialog.manage { width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); }
+    .checks { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem .8rem; }
+    .checks label { white-space: nowrap; font-size: .9rem; }
+    .result .rhead { flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -493,6 +557,8 @@ const TABS = ["rooms", "inbox", "agents", "people"];
 let tab = location.hash.replace("#", "") || localStorage.getItem("gary.tab") || "rooms";
 if (!TABS.includes(tab)) tab = "rooms";
 let room = localStorage.getItem("gary.room") || null;
+let roomOpen = false;          // phones: showing one room full screen instead of the list
+let headExpanded = false;      // phones: room details (description, members, actions) unfolded
 let selected = null;          // inbox filter, in memory only
 let firstPaint = true;
 
@@ -655,12 +721,17 @@ function renderRoomList() {
     </button>`;
   }).join("") : `<div class="empty">no channels yet<br><br><code>gary channel new standup</code></div>`);
   document.querySelectorAll(".roomitem").forEach(el => {
-    el.onclick = () => { room = el.dataset.room; localStorage.setItem("gary.room", room); markRead(); render(); };
+    el.onclick = () => {
+      if (room !== el.dataset.room) headExpanded = false;
+      room = el.dataset.room; roomOpen = true; localStorage.setItem("gary.room", room); markRead(); render();
+      const t = $("transcript"); t.scrollTop = t.scrollHeight;
+    };
   });
 }
 
 function renderRoom() {
   const chan = (state.channels || []).find(c => c.name === room);
+  document.querySelector(".rooms").classList.toggle("open", roomOpen && !!chan);
   if (!chan) {
     paint("room-head", "");
     paint("transcript", `<div class="empty">Create a channel and put agents on it:<br><br>
@@ -670,7 +741,7 @@ function renderRoom() {
     return;
   }
   paint("room-head", `
-    <div class="top"><span class="title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span>
+    <div class="top"><button class="back" id="room-back" title="All channels">‹</button><span class="title" id="room-title">#${esc(chan.name)}</span><span class="desc">${esc(chan.description)}</span>
       <span class="spacer"></span>
       ${admin() ? `<span class="actions"><button class="stop clear" id="clear-room">clear room</button>
         <button class="stop" id="delete-room">delete</button></span>` : ""}</div>
@@ -679,6 +750,9 @@ function renderRoom() {
       || `<span class="hint">nobody has joined yet</span>`}
       ${admin() ? addMemberPicker(chan) : ""}</div>`);
 
+  $("room-head").classList.toggle("expanded", headExpanded);
+  $("room-back").onclick = () => { roomOpen = false; render(); };
+  $("room-title").onclick = () => { headExpanded = !headExpanded; $("room-head").classList.toggle("expanded", headExpanded); };
   const clearBtn = $("clear-room");
   if (clearBtn) clearBtn.onclick = () => clearRoom(chan.name);
   const deleteBtn = $("delete-room");
@@ -1021,11 +1095,11 @@ function renderInbox() {
     const isNew = !seen.has(m.id);
     seen.add(m.id);
     return `<tr class="${isNew ? "new" : ""}">
-      <td class="mono">#${m.id}</td>
-      <td>${esc(m.from)}</td>
-      <td>${esc(m.to)}${m.channel ? ` <span class="tag">#${esc(m.channel)}</span>` : ""}</td>
-      <td><span class="status ${m.status}">${m.status}</span>${m.expects_reply ? ` <span class="tag">wants reply</span>` : ""}</td>
-      <td>${ago(m.created_at)}</td>
+      <td class="mono inline">#${m.id}</td>
+      <td class="inline" data-label="from">${esc(m.from)}</td>
+      <td class="inline" data-label="to">${esc(m.to)}${m.channel ? ` <span class="tag">#${esc(m.channel)}</span>` : ""}</td>
+      <td class="inline"><span class="status ${m.status}">${m.status}</span>${m.expects_reply ? ` <span class="tag">wants reply</span>` : ""}</td>
+      <td class="inline mono">${ago(m.created_at)}</td>
       <td class="body">${rich(m.body)}</td>
     </tr>`;
   }).join(""));
@@ -1069,10 +1143,10 @@ function renderAgents() {
       <td><span class="agentname">${esc(s.agent)}</span>
         <span class="agentsub">${esc(s.node)} · ${esc(s.model || "default model")}</span>
         <span class="agentsub">${esc(s.repo)}</span></td>
-      <td><span class="status ${st}">${st}</span></td>
-      <td class="doing">${doing(s, st)}${s.reset_pending ? `<div class="fresh">fresh context on next message</div>` : ""}</td>
-      <td>${pending ? `<span class="badge">${pending}</span> waiting` : `<span class="idle-note">empty</span>`}</td>
-      <td>${s.last_turn_at ? `<span class="lastturn ${s.last_failed ? "failed" : ""}">${
+      <td class="inline"><span class="status ${st}">${st}</span></td>
+      <td class="doing" data-label="doing">${doing(s, st)}${s.reset_pending ? `<div class="fresh">fresh context on next message</div>` : ""}</td>
+      <td class="inline" data-label="queue">${pending ? `<span class="badge">${pending}</span> waiting` : `<span class="idle-note">empty</span>`}</td>
+      <td class="inline" data-label="last turn">${s.last_turn_at ? `<span class="lastturn ${s.last_failed ? "failed" : ""}">${
         s.last_failed ? "failed" : "finished"} ${ago(s.last_turn_at)}<br>took ${dur(s.last_turn_secs)}</span>`
         : `<span class="idle-note">none yet</span>`}</td>
       <td>${state.api && !state.guest ? `<div class="actions">
@@ -1159,9 +1233,9 @@ function renderPeople() {
   const rooms = n => (state.channels || []).filter(c => (c.members || []).includes(n)).map(c => c.name);
   paint("people", users.map(u => `<tr>
       <td><span class="agentname">${esc(u.name)}</span>${u.name === state.me ? ` <span class="sub hint">you</span>` : ""}</td>
-      <td><select class="addmember" data-role="${esc(u.name)}" ${u.name === state.me ? "disabled title=\"ask another admin\"" : ""}>
+      <td class="inline" data-label="role"><select class="addmember" data-role="${esc(u.name)}" ${u.name === state.me ? "disabled title=\"ask another admin\"" : ""}>
         ${["admin", "guest"].map(r => `<option ${r === u.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
-      <td><div class="chips">${rooms(u.name).map(c => `<span class="chip sm">#${esc(c)}</span>`).join("") || `<span class="idle-note">none</span>`}</div></td>
+      <td data-label="rooms"><div class="chips">${rooms(u.name).map(c => `<span class="chip sm">#${esc(c)}</span>`).join("") || `<span class="idle-note">none</span>`}</div></td>
       <td><div class="actions"><button class="stop reset" data-repass="${esc(u.name)}">new password</button>
         ${u.name === state.me ? "" : `<button class="stop" data-rmuser="${esc(u.name)}">remove</button>`}</div></td>
     </tr>`).join(""));
@@ -1249,8 +1323,11 @@ function render() {
   const up = nodes.filter(n => now - n.last_seen < staleAfter).length;
   const running = (state.spawns || []).filter(s => LIVE.has(s.status));
   const working = running.filter(s => s.status === "running" && s.turn_msg).length;
+  const narrow = matchMedia("(max-width: 720px)").matches; // phones: the short form fits on one line
   paint("pulse", `<span class="dot ${nodes.length && up ? "up" : "stale"}"></span>
-    ${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running.length} agent${running.length === 1 ? "" : "s"}, ${working} working`);
+    <span class="ptext">${narrow
+      ? `${up}/${nodes.length} up · ${running.length} agents · ${working} busy`
+      : `${up}/${nodes.length} machine${nodes.length === 1 ? "" : "s"} · ${running.length} agent${running.length === 1 ? "" : "s"}, ${working} working`}</span>`);
 
   loadRead();
   markRead();
