@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +37,7 @@ var (
 type usageWindow struct {
 	Percent  float64 `json:"percent"`
 	ResetsAt string  `json:"resets_at"`
+	Label    string  `json:"label,omitempty"` // Codex windows: "5h", "7d", from the window length
 }
 
 type usageReport struct {
@@ -167,24 +172,153 @@ func fetchUsage(hc *http.Client) (*usageReport, error) {
 	}
 	rep := &usageReport{Plan: creds.OAuth.SubscriptionType}
 	if w := body.FiveHour; w != nil {
-		rep.FiveHour = &usageWindow{w.Utilization, w.ResetsAt}
+		rep.FiveHour = &usageWindow{Percent: w.Utilization, ResetsAt: w.ResetsAt}
 	}
 	if w := body.SevenDay; w != nil {
-		rep.SevenDay = &usageWindow{w.Utilization, w.ResetsAt}
+		rep.SevenDay = &usageWindow{Percent: w.Utilization, ResetsAt: w.ResetsAt}
 	}
 	return rep, nil
 }
 
 func registerUsage(mux *http.ServeMux) {
 	c := &usageCache{http: &http.Client{Timeout: 10 * time.Second}}
+	var codexMu sync.Mutex
+	var codexAt time.Time
+	var codex *codexUsageReport
 	mux.HandleFunc("/api/usage", func(w http.ResponseWriter, r *http.Request) {
+		codexMu.Lock()
+		if time.Since(codexAt) >= 30*time.Second {
+			codex, codexAt = readCodexUsage(), time.Now()
+		}
+		cx := codex
+		codexMu.Unlock()
 		rep, err := c.get()
 		w.Header().Set("Content-Type", "application/json")
+		// Claude's fields stay top-level (older dashboards); Codex rides along under "codex".
+		out := map[string]any{}
 		if err != nil {
-			// Not an error the dashboard can do anything about; it hides the widget.
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
+			// Not an error the dashboard can do anything about; it hides the Claude part.
+			out["error"] = err.Error()
+		} else {
+			raw, _ := json.Marshal(rep)
+			json.Unmarshal(raw, &out)
 		}
-		json.NewEncoder(w).Encode(rep)
+		if cx != nil {
+			out["codex"] = cx
+		}
+		json.NewEncoder(w).Encode(out)
 	})
+}
+
+// Codex usage: Codex has no usage endpoint the hub can call, but every Codex
+// session log (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) records the
+// account's rate-limit snapshot on each token_count event. The newest snapshot
+// across recent logs is the current usage. Local files only: no API call.
+
+var codexSessionsDir = func() string {
+	if d := os.Getenv("CODEX_HOME"); d != "" {
+		return filepath.Join(d, "sessions")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "sessions")
+}
+
+type codexUsageReport struct {
+	Primary   *usageWindow `json:"primary,omitempty"`
+	Secondary *usageWindow `json:"secondary,omitempty"`
+	At        string       `json:"at,omitempty"` // when Codex last reported it
+}
+
+type codexWindow struct {
+	UsedPercent   float64 `json:"used_percent"`
+	WindowMinutes int     `json:"window_minutes"`
+	ResetsAt      int64   `json:"resets_at"`
+}
+
+func (w *codexWindow) window() *usageWindow {
+	if w == nil {
+		return nil
+	}
+	reset := ""
+	if w.ResetsAt > 0 {
+		reset = time.Unix(w.ResetsAt, 0).UTC().Format(time.RFC3339)
+	}
+	return &usageWindow{Percent: w.UsedPercent, ResetsAt: reset, Label: windowLabel(w.WindowMinutes)}
+}
+
+// windowLabel names a limit window the way the header shows it: 5h, 7d, ...
+func windowLabel(minutes int) string {
+	switch {
+	case minutes <= 0:
+		return ""
+	case minutes%1440 == 0:
+		return strconv.Itoa(minutes/1440) + "d"
+	case minutes%60 == 0:
+		return strconv.Itoa(minutes/60) + "h"
+	}
+	return strconv.Itoa(minutes) + "m"
+}
+
+// readCodexUsage returns the newest rate-limit snapshot in the Codex session
+// logs written in the last week, or nil when there is none.
+func readCodexUsage() *codexUsageReport {
+	var files []string
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	filepath.WalkDir(codexSessionsDir(), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".jsonl") {
+			return nil
+		}
+		if info, e := d.Info(); e == nil && info.ModTime().After(cutoff) {
+			files = append(files, p)
+		}
+		return nil
+	})
+	mtime := func(p string) time.Time {
+		info, err := os.Stat(p)
+		if err != nil {
+			return time.Time{}
+		}
+		return info.ModTime()
+	}
+	sort.Slice(files, func(i, j int) bool { return mtime(files[i]).After(mtime(files[j])) })
+	var best *codexUsageReport
+	var bestAt time.Time
+	for i, p := range files {
+		// the newest few files hold the newest snapshot; stop once older files can't beat it
+		if i >= 8 || (best != nil && mtime(p).Before(bestAt)) {
+			break
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1<<20), 16<<20)
+		for sc.Scan() {
+			line := sc.Bytes()
+			if !bytes.Contains(line, []byte(`"rate_limits":{`)) {
+				continue
+			}
+			var ev struct {
+				Timestamp string `json:"timestamp"`
+				Payload   struct {
+					RateLimits *struct {
+						Primary   *codexWindow `json:"primary"`
+						Secondary *codexWindow `json:"secondary"`
+					} `json:"rate_limits"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(line, &ev) != nil || ev.Payload.RateLimits == nil {
+				continue
+			}
+			at, _ := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			if best == nil || at.After(bestAt) {
+				rl := ev.Payload.RateLimits
+				best = &codexUsageReport{Primary: rl.Primary.window(), Secondary: rl.Secondary.window(), At: ev.Timestamp}
+				bestAt = at
+			}
+		}
+		f.Close()
+	}
+	return best
 }

@@ -65,6 +65,10 @@
   .dot.stale { background: var(--red); box-shadow: 0 0 0 3px rgba(240,113,122,.14); }
   .usage { color: var(--dim); font: .76rem/1 var(--mono); white-space: nowrap; }
   .usage .hot { color: var(--red); }
+  .usage .svc b { font-weight: 600; margin-right: .25rem; }
+  .usage .svc.claude b { color: #d4a27f; }
+  .usage .svc.codex b { color: #7dcfa8; }
+  .usage .sep { color: var(--faint); margin: 0 .5rem; }
   .usage .stale { opacity: .55; }
   .signout { color: var(--faint); font-size: .8rem; text-decoration: none; }
   .signout:hover { color: var(--red); }
@@ -319,6 +323,10 @@
     table { min-width: 40rem; }
     .doing { min-width: 14rem; }
     .result .rhead { flex-wrap: wrap; }
+    /* phones: Claude and Codex usage on two short lines instead of one long one */
+    .usage { font-size: .68rem; line-height: 1.35; text-align: right; }
+    .usage .svc { display: block; }
+    .usage .sep { display: none; }
   }
 </style>
 </head>
@@ -328,7 +336,7 @@
   <div class="brand">gary<span class="dbpath" id="db-path"></span></div>
   <div class="spacer"></div>
   <div class="pulse" id="pulse"></div>
-  <span class="usage" id="usage" title="Claude subscription usage"></span>
+  <span class="usage" id="usage" title="Claude and Codex usage"></span>
   <a class="signout" id="signout" href="logout">sign out</a>
 </header>
 
@@ -1282,10 +1290,20 @@ async function usageTick() {
     const left = w.resets_at ? dur(Date.parse(w.resets_at) / 1000 - Date.now() / 1000) : "";
     return `<span class="${w.percent >= 80 ? "hot" : ""}" title="resets in ${left}">${label} ${Math.round(w.percent)}%</span>`;
   };
-  const text = u.error ? "" : [win("5h", u.five_hour), win("7d", u.seven_day)].filter(Boolean).join(" · ");
-  // A stale reading (the upstream is rate-limiting) still shows, dimmed, with its age.
-  const age = u.at ? dur(Date.now() / 1000 - Date.parse(u.at) / 1000) : "";
-  paint("usage", text && u.stale ? `<span class="stale" title="as of ${age} ago (Anthropic is rate-limiting the usage check)">${text}</span>` : text);
+  const ago = at => at ? dur(Date.now() / 1000 - Date.parse(at) / 1000) : "";
+  // Each service is its own group with its name in front, so the two can't be mixed up.
+  const group = (name, cls, wins, stale, note) => {
+    const body = wins.filter(Boolean).join(" · ");
+    if (!body) return "";
+    return `<span class="svc ${cls}${stale ? " stale" : ""}" title="${note}"><b>${name}</b> ${body}</span>`;
+  };
+  const claude = u.error ? "" : group("Claude", "claude", [win("5h", u.five_hour), win("7d", u.seven_day)], u.stale,
+    u.stale ? `Claude subscription, as of ${ago(u.at)} ago (Anthropic is rate-limiting the usage check)` : "Claude subscription");
+  const cx = u.codex;
+  const codex = cx ? group("Codex", "codex",
+    [cx.primary && win(cx.primary.label || "", cx.primary), cx.secondary && win(cx.secondary.label || "", cx.secondary)],
+    false, `Codex (ChatGPT plan), as Codex last reported it ${ago(cx.at)} ago`) : "";
+  paint("usage", [claude, codex].filter(Boolean).join('<span class="sep">|</span>'));
 }
 
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.tab));

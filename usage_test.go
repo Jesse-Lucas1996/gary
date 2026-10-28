@@ -126,7 +126,30 @@ func TestMain(m *testing.M) {
 	usageSavePath = func() string { return filepath.Join(dir, "usage.json") }
 	usageCredsPath = func() string { return filepath.Join(dir, "no-credentials.json") }
 	usageURL = "http://127.0.0.1:1/usage-disabled-in-tests"
+	codexSessionsDir = func() string { return filepath.Join(dir, "codex-sessions") }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// Codex usage comes from the newest rate_limits snapshot in the session logs.
+func TestCodexUsageFromSessionLogs(t *testing.T) {
+	dir := t.TempDir()
+	old := codexSessionsDir
+	codexSessionsDir = func() string { return dir }
+	defer func() { codexSessionsDir = old }()
+	day := filepath.Join(dir, "2026", "10", "28")
+	os.MkdirAll(day, 0o755)
+	os.WriteFile(filepath.Join(day, "rollout-a.jsonl"), []byte(
+		`{"timestamp":"2026-10-28T01:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":40,"window_minutes":300,"resets_at":1793600000},"secondary":{"used_percent":70,"window_minutes":10080,"resets_at":1793626730}}}}`+"\n"+
+			`{"timestamp":"2026-10-28T02:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":87,"window_minutes":10080,"resets_at":1793626730},"secondary":null}}}`+"\n"), 0o644)
+	got := readCodexUsage()
+	if got == nil || got.Primary == nil || got.Primary.Percent != 87 || got.Primary.Label != "7d" || got.Secondary != nil ||
+		got.At != "2026-10-28T02:00:00Z" {
+		t.Fatalf("codex usage: %+v", got)
+	}
+	codexSessionsDir = func() string { return filepath.Join(dir, "missing") }
+	if readCodexUsage() != nil {
+		t.Fatal("no logs should mean no codex usage")
+	}
 }
