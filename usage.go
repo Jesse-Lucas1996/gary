@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -185,10 +186,14 @@ func registerUsage(mux *http.ServeMux) {
 	var codexMu sync.Mutex
 	var codexAt time.Time
 	var codex *codexUsageReport
+	var codexStamp string
 	mux.HandleFunc("/api/usage", func(w http.ResponseWriter, r *http.Request) {
 		codexMu.Lock()
 		if time.Since(codexAt) >= 30*time.Second {
-			codex, codexAt = readCodexUsage(), time.Now()
+			if stamp := codexLogsStamp(); stamp != codexStamp || codex == nil {
+				codex, codexStamp = readCodexUsage(), stamp
+			}
+			codexAt = time.Now()
 		}
 		cx := codex
 		codexMu.Unlock()
@@ -222,6 +227,8 @@ var codexSessionsDir = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "sessions")
 }
+
+const codexTailBytes = 4 << 20
 
 type codexUsageReport struct {
 	Primary   *usageWindow `json:"primary,omitempty"`
@@ -292,6 +299,11 @@ func readCodexUsage() *codexUsageReport {
 		if err != nil {
 			continue
 		}
+		// Session logs grow to hundreds of MB; the newest snapshot is near the end.
+		if info, e := f.Stat(); e == nil && info.Size() > codexTailBytes {
+			f.Seek(info.Size()-codexTailBytes, io.SeekStart)
+			bufio.NewReader(f).ReadString('\n') // skip the cut line
+		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1<<20), 16<<20)
 		for sc.Scan() {
@@ -321,4 +333,20 @@ func readCodexUsage() *codexUsageReport {
 		f.Close()
 	}
 	return best
+}
+
+// codexLogsStamp changes whenever any session log is written: the newest
+// mtime and its size. Stat calls only, no reads.
+func codexLogsStamp() string {
+	newest, size := time.Time{}, int64(0)
+	filepath.WalkDir(codexSessionsDir(), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".jsonl") {
+			return nil
+		}
+		if info, e := d.Info(); e == nil && info.ModTime().After(newest) {
+			newest, size = info.ModTime(), info.Size()
+		}
+		return nil
+	})
+	return fmt.Sprintf("%d:%d", newest.UnixNano(), size)
 }
