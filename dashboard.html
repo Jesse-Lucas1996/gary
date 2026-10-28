@@ -65,6 +65,7 @@
   .dot.stale { background: var(--red); box-shadow: 0 0 0 3px rgba(240,113,122,.14); }
   .usage { color: var(--dim); font: .76rem/1 var(--mono); white-space: nowrap; }
   .usage .hot { color: var(--red); }
+  .usage .stale { opacity: .55; }
   .signout { color: var(--faint); font-size: .8rem; text-decoration: none; }
   .signout:hover { color: var(--red); }
 
@@ -147,10 +148,15 @@
 
   .composer { border-top: 1px solid var(--line); padding: .8rem 1.25rem 1rem; }
   .composer textarea {
-    width: 100%; min-height: 62px; max-height: 220px; resize: vertical;
+    width: 100%; min-height: 62px; max-height: 70vh; resize: vertical;
     background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
     padding: .65rem .8rem; outline: none; transition: border-color .15s, box-shadow .15s;
   }
+  /* drag bar: resize the message box with mouse or touch (the native corner grip is tiny and absent on phones) */
+  .composer .grip { height: 14px; margin: -.55rem 0 .15rem; cursor: ns-resize; touch-action: none;
+    display: flex; align-items: center; justify-content: center; }
+  .composer .grip::before { content: ""; width: 44px; height: 4px; border-radius: 2px; background: var(--line); }
+  .composer .grip:hover::before, .composer .grip.dragging::before { background: var(--accent); }
   .composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,247,.13); }
   .composer textarea:disabled { opacity: .5; cursor: not-allowed; }
   .composer .foot { display: flex; align-items: center; justify-content: space-between; margin-top: .5rem; gap: 1rem; }
@@ -344,6 +350,7 @@
         <div class="roomhead" id="room-head"></div>
         <div class="transcript" id="transcript"></div>
         <form class="composer" id="composer">
+          <div class="grip" id="compose-grip" title="Drag to resize"></div>
           <textarea id="compose" rows="2" placeholder="Write to the channel…"></textarea>
           <div class="pending" id="compose-pending"></div>
           <div class="foot">
@@ -1275,7 +1282,10 @@ async function usageTick() {
     const left = w.resets_at ? dur(Date.parse(w.resets_at) / 1000 - Date.now() / 1000) : "";
     return `<span class="${w.percent >= 80 ? "hot" : ""}" title="resets in ${left}">${label} ${Math.round(w.percent)}%</span>`;
   };
-  paint("usage", u.error ? "" : [win("5h", u.five_hour), win("7d", u.seven_day)].filter(Boolean).join(" · "));
+  const text = u.error ? "" : [win("5h", u.five_hour), win("7d", u.seven_day)].filter(Boolean).join(" · ");
+  // A stale reading (the upstream is rate-limiting) still shows, dimmed, with its age.
+  const age = u.at ? dur(Date.now() / 1000 - Date.parse(u.at) / 1000) : "";
+  paint("usage", text && u.stale ? `<span class="stale" title="as of ${age} ago (Anthropic is rate-limiting the usage check)">${text}</span>` : text);
 }
 
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.tab));
@@ -1302,6 +1312,32 @@ $("compose-pending").onclick = e => {
   pending.splice(Number(i), 1);
   renderPending();
 };
+// Message box height: drag the bar above it (pointer events: mouse and touch); the height is remembered.
+(() => {
+  const box = $("compose"), grip = $("compose-grip");
+  const saved = +localStorage.getItem("gary.composeHeight");
+  if (saved >= 62) box.style.height = saved + "px";
+  let startY = 0, startH = 0;
+  grip.addEventListener("pointerdown", e => {
+    startY = e.clientY; startH = box.offsetHeight;
+    grip.setPointerCapture(e.pointerId); grip.classList.add("dragging"); e.preventDefault();
+  });
+  grip.addEventListener("pointermove", e => {
+    if (!grip.hasPointerCapture(e.pointerId)) return;
+    const h = Math.max(62, Math.min(innerHeight * 0.7, startH + (startY - e.clientY)));
+    box.style.height = h + "px";
+  });
+  const end = e => {
+    if (!grip.hasPointerCapture(e.pointerId)) return;
+    grip.releasePointerCapture(e.pointerId); grip.classList.remove("dragging");
+    localStorage.setItem("gary.composeHeight", String(box.offsetHeight));
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => { box.style.height = ""; localStorage.removeItem("gary.composeHeight"); });
+  // the native corner grip resizes too: remember that as well
+  new ResizeObserver(() => { if (box.style.height) localStorage.setItem("gary.composeHeight", String(box.offsetHeight)); }).observe(box);
+})();
 $("compose").addEventListener("paste", e => {
   const imgs = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
   if (imgs.length) { e.preventDefault(); addFiles(imgs); }
